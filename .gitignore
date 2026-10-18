@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# PyInstaller / Packaging / Release artifacts
+build/
+dist/
+release_bundle/
+*.spec
+*.pyz
+*.uf2
+*.bin
+*.zip
+SHA256SUMS.txt
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local temporary screenshots & logs
+Screenshot*.png
+desk_buddy_screen.jpg
+*.log

@@ -1,0 +1,150 @@
+name: Build & Release Desk-Buddy
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "**.png"
+      - "**.jpg"
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type (auto detects from commits by default)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - minor
+          - patch
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Release on Linux (Python Latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository with full history and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up latest Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: "pip"
+
+      - name: Install dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Validate Python syntax (Firmware & Multi-OS Host Daemon)
+        run: |
+          python -m py_compile code.py host_companion.py
+
+      - name: Determine next semantic version & create Git tag
+        id: version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Last tag: $LAST_TAG"
+
+          VERSION=${LAST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          BUMP="${{ github.event.inputs.bump_type || 'auto' }}"
+          if [ "$BUMP" = "auto" ]; then
+            if [ "$LAST_TAG" = "v0.0.0" ]; then
+              NEW_TAG="v1.0.0"
+            else
+              COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s %b")
+              if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|!:"; then
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+              elif echo "$COMMITS" | grep -qiE "^feat|\bfeat(\(.*\))?:|\bfeature\b|\badd\b"; then
+                MINOR=$((MINOR + 1))
+                PATCH=0
+              else
+                PATCH=$((PATCH + 1))
+              fi
+              NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+            fi
+          elif [ "$BUMP" = "major" ]; then
+            NEW_TAG="v$((MAJOR + 1)).0.0"
+          elif [ "$BUMP" = "minor" ]; then
+            NEW_TAG="v${MAJOR}.$((MINOR + 1)).0"
+          else
+            NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          echo "New tag: $NEW_TAG"
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build standalone binary (PyInstaller) & universal cross-platform bundle
+        run: |
+          pyinstaller \
+            --noconfirm \
+            --onefile \
+            --clean \
+            --name desk-buddy-host-linux-x86_64 \
+            host_companion.py
+
+          chmod +x dist/desk-buddy-host-linux-x86_64
+          ./dist/desk-buddy-host-linux-x86_64 --help
+
+          # Build universal cross-platform executable zipapp (.pyz) for macOS / Linux / Windows
+          mkdir -p build_pyz
+          cp host_companion.py build_pyz/__main__.py
+          python -m zipapp build_pyz -p "/usr/bin/env python3" -o dist/desk-buddy-host-universal.pyz
+          chmod +x dist/desk-buddy-host-universal.pyz
+
+      - name: Package RP2040-Zero CircuitPython firmware bundle
+        run: |
+          mkdir -p release_bundle/rp2040-zero-circuitpython
+          cp code.py release_bundle/rp2040-zero-circuitpython/code.py
+          cp host_companion.py release_bundle/rp2040-zero-circuitpython/host_companion.py
+          cp requirements.txt release_bundle/rp2040-zero-circuitpython/requirements.txt
+          cp README.md release_bundle/rp2040-zero-circuitpython/README.md
+
+          curl -fsSL \
+            "https://downloads.circuitpython.org/bin/waveshare_rp2040_zero/en_US/adafruit-circuitpython-waveshare_rp2040_zero-en_US-9.2.4.uf2" \
+            -o dist/circuitpython-waveshare-rp2040-zero.uf2 || true
+
+          cd release_bundle
+          zip -r ../dist/rp2040-zero-desk-buddy-firmware.zip rp2040-zero-circuitpython
+          cd ..
+          cp code.py dist/code.py
+
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "🐾 Desk-Buddy ${{ steps.version.outputs.tag }}"
+          generate_release_notes: true
+          files: |
+            dist/desk-buddy-host-linux-x86_64
+            dist/desk-buddy-host-universal.pyz
+            dist/rp2040-zero-desk-buddy-firmware.zip
+            dist/circuitpython-waveshare-rp2040-zero.uf2
+            dist/code.py
+            dist/SHA256SUMS.txt

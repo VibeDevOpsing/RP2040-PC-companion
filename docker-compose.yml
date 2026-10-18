@@ -1,0 +1,19 @@
+services:
+  desk-buddy:
+    build: .
+    container_name: rp2040-desk-buddy
+    restart: unless-stopped
+    privileged: true
+    network_mode: bridge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - IN_DOCKER=1
+      - LMSTUDIO_URL=${LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
+      - DESK_BUDDY_PORT=${DESK_BUDDY_PORT:-}
+      - DISPLAY=${DISPLAY:-:0}
+      - XAUTHORITY=/root/.Xauthority
+    volumes:
+      # Linux X11 / Wayland / USB device passthrough
+      - /dev:/dev
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
