@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
 Cross-Platform Host Companion Daemon (macOS, Linux, Windows)
-for Waveshare RP2040-Zero 8-Bit Snow Bear / Yeti Desk-Buddy.
+for the Waveshare RP2040-Zero 3D Grok Bot desk companion (ST7735R 160x80).
 
 Architecture:
-  - Purely visual 8-bit display (zero text clutter): thoughts and context are rendered
-    as animated pixel art inside the Dynamic Wall Painting (`POSTER`) + Time-of-Day Mountain Landscape.
+  - The RP2040 renders a raymarched 3D bot with props (coffee, laptop, lightbulb) and a
+    side comic callout bubble. This daemon decides WHAT the bot does and THINKS.
   - Multi-OS Native Sensors (macOS, Linux X11/Wayland, Windows):
-    * Auto-detects RP2040 USB Serial (`0x2E8A` VID or `/dev/cu.usbmodem*`, `/dev/ttyACM*`, `COM*`)
-    * Frontmost application & window title
-    * System user idle time (keyboard/mouse inactivity)
-    * CPU load & Pomodoro stamina energy
-    * Silent downscaled screenshot capture for Vision LLMs
+      * Auto-detects RP2040 USB Serial (`0x2E8A` VID or `/dev/cu.usbmodem*`, `/dev/ttyACM*`, `COM*`)
+      * Frontmost application & window title
+      * System user idle time (keyboard/mouse inactivity)
+      * CPU load & Pomodoro stamina energy
+      * Optional downscaled screenshot for Vision LLMs
   - Hybrid Brain:
-    * Tier 1 (Reflexes, every 1.5s): Instant reaction to app switches, CPU spikes, idle sleep.
-    * Tier 2 (LM Studio Subconscious, every 25s): Queries local 1B-2B VLM/LLM (e.g. `google/gemma-4-e2b`).
+      * Tier 1 (Reflexes, every 1.5s): instant state from app switches, CPU spikes, idle sleep.
+      * Tier 2 (Thought Engine, background thread): a local LLM in LM Studio
+        (e.g. `google/gemma-4-e2b`) reads the current context + recent activity timeline
+        and writes up to 3 short live "thoughts" (e.g. "CURSOR AGAIN?", "TESTS RED?!").
+        It runs periodically AND immediately on meaningful events (app switch, CPU panic,
+        returning from AFK), without ever blocking the reflex loop.
+
+Serial protocol (one line per update, `\\n` terminated):
+  STATE:<STATE>|THEME:<THEME>|MSG:<T1~T2~T3>|MOOD:..|ACT:..|NRG:..|CPU:..|EVT:..|POSTER:..|HOUR:..
+  `MSG` holds `~`-separated thoughts that the firmware rotates in the bubble.
+  An empty `MSG:` tells the firmware to fall back to its built-in phrase pool.
 """
 
 import argparse
@@ -30,8 +39,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from typing import Optional, Dict, Any, Tuple
+from collections import deque
+from typing import Optional, Dict, Any, List, Sequence, Tuple
 
 try:
     import serial
@@ -78,6 +89,12 @@ RP2040_USB_VIDS = {0x2E8A, 0x239A}
 VALID_MOODS = {
     "focused", "happy", "curious", "vibing", "bored", "tired", "sleepy", "stressed", "panicking"
 }
+VALID_STATES = {
+    "CODING", "COFFEE", "THINKING", "CHILL", "SLEEP", "OVERLOAD", "PARTY"
+}
+VALID_THEMES = {
+    "CYBER", "VIOLET", "TEAL", "EMERALD", "INDIGO", "CRIMSON", "GOLD"
+}
 VALID_POSTERS = {
     "code_matrix",    # Falling green matrix code + </> (coding / terminal)
     "bug_alert",      # Crawling pixel beetle + ! (debugging / errors / stackoverflow)
@@ -122,6 +139,112 @@ ROCKET_KEYWORDS = {
     "pull request", "deploy", "release", "build succeeded", "passed", "merged"
 }
 
+# ─── THOUGHT BUBBLE CONSTRAINTS (must mirror firmware `split_callout_lines`) ─
+BUBBLE_LINE_CHARS = 10          # 6x8 bold font, 7px advance, 80px max bubble width
+BUBBLE_MAX_LINES = 2
+MAX_THOUGHTS = 3
+THOUGHT_TTL_SEC = 75.0          # How long LLM thoughts stay valid without refresh
+THOUGHT_MIN_GAP_SEC = 8.0       # Never call the LLM more often than this
+SERIAL_HEARTBEAT_SEC = 10.0     # Resend unchanged state at most this often
+_ALLOWED_BUBBLE_CHARS = re.compile(r"[^A-Z0-9!?.,+\-/:%#><_ ]")
+
+
+def layout_bubble_lines(text: str, width: int = BUBBLE_LINE_CHARS) -> Optional[List[str]]:
+    """Greedy word-wrap identical to the firmware. Returns None if text doesn't fit in 2 lines."""
+    words = text.split()
+    if not words:
+        return None
+    lines: List[str] = []
+    cur = ""
+    for w in words:
+        if len(w) > width:
+            return None
+        if not cur:
+            cur = w
+        elif len(cur) + 1 + len(w) <= width:
+            cur += " " + w
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    return lines if len(lines) <= BUBBLE_MAX_LINES else None
+
+
+def sanitize_thought(text: Any) -> str:
+    """Uppercases, strips unsupported glyphs and shortens a thought until it fits the bubble."""
+    if not isinstance(text, str):
+        return ""
+    t = text.upper().replace("~", "-")
+    t = t.replace("’", "'").replace("'", "")
+    t = _ALLOWED_BUBBLE_CHARS.sub(" ", t)
+    words = [w[:BUBBLE_LINE_CHARS] for w in t.split()]
+    while words and layout_bubble_lines(" ".join(words)) is None:
+        words.pop()
+    return " ".join(words)
+
+
+def sanitize_thoughts(items: Any, limit: int = MAX_THOUGHTS) -> List[str]:
+    """Normalizes an LLM `thoughts` value (list or string) into <= `limit` unique bubble-safe strings."""
+    if isinstance(items, str):
+        items = re.split(r"[~\n|]", items)
+    if not isinstance(items, (list, tuple)):
+        return []
+    out: List[str] = []
+    for it in items:
+        s = sanitize_thought(it)
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def build_packet(
+    state: str, theme: str, thoughts: Sequence[str], mood: str, act: str,
+    nrg: int, cpu: int, evt: str, poster: str, hour: int,
+) -> str:
+    """Builds one serial protocol line. `thoughts` are sanitized and `~`-joined into MSG."""
+    msg = "~".join(sanitize_thoughts(list(thoughts)))
+    return (
+        f"STATE:{state}|THEME:{theme}|MSG:{msg}|"
+        f"MOOD:{mood}|ACT:{act}|NRG:{nrg}|CPU:{cpu}|EVT:{evt}|POSTER:{poster}|HOUR:{hour}\n"
+    )
+
+
+class ActivityTimeline:
+    """Remembers recent app/window switches so the LLM can react to what *changed*."""
+
+    def __init__(self, maxlen: int = 8):
+        self.events: deque = deque(maxlen=maxlen)
+        self.current_since: float = time.time()
+
+    def update(self, app: str, title: str, now: Optional[float] = None) -> bool:
+        """Records a switch. Returns True if the frontmost app changed."""
+        now = time.time() if now is None else now
+        if app == "Unknown":
+            return False
+        if self.events and self.events[-1][1] == app:
+            if self.events[-1][2] != title:
+                ts, a, _ = self.events[-1]
+                self.events[-1] = (ts, a, title)
+            return False
+        self.events.append((now, app, title))
+        self.current_since = now
+        return True
+
+    def dwell_minutes(self, now: Optional[float] = None) -> float:
+        now = time.time() if now is None else now
+        return max(0.0, (now - self.current_since) / 60.0)
+
+    def summary(self, now: Optional[float] = None) -> str:
+        now = time.time() if now is None else now
+        lines = []
+        for ts, app, title in list(self.events)[-6:]:
+            ago = int(max(0, now - ts) // 60)
+            short_title = (title or "")[:48]
+            lines.append(f"- {ago}m ago: {app}" + (f" — {short_title}" if short_title else ""))
+        return "\n".join(lines) if lines else "- (no history yet)"
+
 
 # ─── MULTI-OS SERIAL PORT MANAGER ───────────────────────────────────────────
 class BoardSerial:
@@ -131,6 +254,8 @@ class BoardSerial:
         self.ser: Optional[serial.Serial] = None
         self.port_name: Optional[str] = None
         self.last_packet: str = ""
+        self.last_key: Optional[tuple] = None
+        self.last_send_ts: float = 0.0
 
     def find_port(self) -> Optional[str]:
         if self.port_override:
@@ -196,12 +321,27 @@ class BoardSerial:
         cpu: int,
         evt: str,
         poster: str,
+        state: str = "COFFEE",
+        theme: str = "CYBER",
+        thoughts: Sequence[str] = (),
         force: bool = False,
     ) -> bool:
-        cur_hour = time.localtime().tm_hour
-        packet = f"MOOD:{mood}|ACT:{act}|NRG:{nrg}|CPU:{cpu}|EVT:{evt}|POSTER:{poster}|HOUR:{cur_hour}\n"
-        if not force and packet == self.last_packet:
+        """Sends a state line to the board.
+
+        Packets are only written when the *semantic* content (state/theme/thoughts/mood/
+        activity/event) changes, or every SERIAL_HEARTBEAT_SEC as a keep-alive. CPU/energy
+        jitter alone does not trigger a write, which keeps the RP2040 from re-parsing
+        (and allocating strings for) identical lines every 1.5s.
+        """
+        now = time.time()
+        clean = tuple(sanitize_thoughts(list(thoughts)))
+        key = (state, theme, clean, mood, act, evt, poster)
+        if not force and key == self.last_key and (now - self.last_send_ts) < SERIAL_HEARTBEAT_SEC:
             return True
+
+        packet = build_packet(
+            state, theme, clean, mood, act, nrg, cpu, evt, poster, time.localtime().tm_hour
+        )
 
         if not self.ensure_connected():
             return False
@@ -209,8 +349,11 @@ class BoardSerial:
         try:
             self.ser.write(packet.encode("utf-8", errors="ignore"))
             self.ser.flush()
+            if key != self.last_key:
+                print(f">>> [RP2040] {packet.strip()}")
             self.last_packet = packet
-            print(f">>> [RP2040] {packet.strip()}")
+            self.last_key = key
+            self.last_send_ts = now
             return True
         except Exception as e:
             print(f"[Serial] Write lost ({e}), will reconnect...")
@@ -317,9 +460,37 @@ def get_active_window_info() -> Tuple[str, str]:
     return "Unknown", ""
 
 
+_MAC_IDLE_FN: Any = None
+_MAC_IDLE_LOADED = False
+
+
+def _mac_idle_fn():
+    """Loads CoreGraphics' CGEventSourceSecondsSinceLastEventType once (no subprocess per tick)."""
+    global _MAC_IDLE_FN, _MAC_IDLE_LOADED
+    if not _MAC_IDLE_LOADED:
+        _MAC_IDLE_LOADED = True
+        try:
+            lib = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+            )
+            fn = lib.CGEventSourceSecondsSinceLastEventType
+            fn.restype = ctypes.c_double
+            fn.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+            _MAC_IDLE_FN = fn
+        except Exception:
+            _MAC_IDLE_FN = None
+    return _MAC_IDLE_FN
+
+
 def get_system_idle_seconds() -> float:
     """Returns seconds since last keyboard/mouse input across macOS, Linux, and Windows."""
     if OS_SYSTEM == "darwin":
+        fn = _mac_idle_fn()
+        if fn is not None:
+            try:
+                return max(0.0, float(fn(1, 0xFFFFFFFF)))  # HIDSystemState, kCGAnyInputEventType
+            except Exception:
+                pass
         try:
             res = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=1.0)
             m = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', res.stdout)
@@ -470,39 +641,52 @@ class LMStudioBrain:
         cpu: int,
         idle_sec: float,
         work_streak_min: float,
+        timeline: str = "",
+        dwell_min: float = 0.0,
+        recent_thoughts: Sequence[str] = (),
+        reflex_state: str = "",
     ) -> Optional[Dict[str, Any]]:
-        """Calls local 1B-2B LLM in LM Studio to pick the Dynamic Wall Painting (`poster`), `mood`, and `event`."""
+        """Asks the local LLM for the bot's action/theme and up to 3 live thoughts.
+
+        Returns the parsed JSON dict with a normalized `thoughts` list (bubble-safe), or None.
+        """
         system_prompt = (
-            "You are the subconscious brain of a cozy pixel-art companion sitting in a room with a Dynamic Wall Painting. "
-            "There is NO text on the display: you express all thoughts by changing the animated painting (`poster`) on the wall! "
-            "Choose the best `poster` from this exact list:\n"
-            "- code_matrix (writing code, terminal work, deep programming)\n"
-            "- bug_alert (debugging errors, stack traces, fixing bugs, warnings)\n"
-            "- coffee_need (user working too long, low energy, needs a break)\n"
-            "- brain_idea (reading docs, AI brainstorming, learning, designing)\n"
-            "- fire_panic (high CPU load, intense stress, heavy compilation)\n"
-            "- music_eq (listening to music, Spotify, audio vibes)\n"
-            "- chill_play (watching YouTube/video, gaming, social media, relaxing)\n"
-            "- rocket_launch (shipping code, git push, great productive flow)\n"
-            "- heart_love (happy mood, balanced energy, positive vibe)\n"
-            "- zzz_dream (user is idle/AFK or sleeping)\n"
-            "- zen_mountain (calm web browsing, peaceful reading)\n\n"
-            "Respond ONLY with a single valid JSON object (no markdown fences):\n"
-            '{"poster": "one_of_the_posters_above", '
-            '"mood": "focused|happy|curious|vibing|bored|tired|stressed|panicking", '
-            '"event": "none|sip_coffee|cheer", '
-            '"energy_delta": 0}'
+            "You are Grok Bot, a tiny 3D ghost-robot living on a 160x80 desk display next to a developer. "
+            "You watch what the developer is doing RIGHT NOW and react with short inner thoughts shown in a "
+            "comic bubble beside you.\n"
+            "Pick your `state` (physical action + prop):\n"
+            "- CODING: typing on a laptop (developer is coding / in terminal)\n"
+            "- COFFEE: walking around sipping coffee (light browsing, long streak, tired)\n"
+            "- THINKING: pondering with a lightbulb (docs, AI chats, reading, planning, short pauses)\n"
+            "- CHILL: sitting cozily (music, videos, social media, resting)\n"
+            "- SLEEP: sleeping (developer AFK)\n"
+            "- OVERLOAD: panicking (errors, crashes, failing tests, CPU on fire)\n"
+            "- PARTY: celebrating (deploy, merged PR, tests passed, release)\n"
+            "Pick a `theme` tint: CYBER, VIOLET, TEAL, EMERALD, INDIGO, CRIMSON or GOLD.\n\n"
+            "Write `thoughts`: 1 to 3 DIFFERENT reactions to the CURRENT situation, like inner monologue.\n"
+            "Rules for every thought:\n"
+            "- max 3 words and max 16 characters, ENGLISH, UPPERCASE, ASCII only, no emoji, no quotes\n"
+            "- be specific: mention the app, file, site or what changed (short names like VSCODE, PR, TESTS, YT)\n"
+            "- witty dev slang allowed: WTF?!, LGTM!, OTF, BRB, 10X, NGL, SUS, GG\n"
+            "- never repeat any of the recent thoughts you are given\n"
+            "Good examples: 'CURSOR AGAIN?', 'TESTS RED?!', 'YT BREAK~', 'PR MERGED!', '2H IN VIM', "
+            "'READ DOCS', 'CPU ON FIRE', 'BACK FROM AFK', 'NEED COFFEE', 'SHIP IT!'.\n\n"
+            "Respond ONLY with one JSON object:\n"
+            '{"state": "...", "theme": "...", "thoughts": ["...", "..."], '
+            '"mood": "focused|happy|curious|vibing|bored|tired|sleepy|stressed|panicking", '
+            '"event": "none|sip_coffee|cheer", "energy_delta": 0}'
         )
 
+        recent = ", ".join(recent_thoughts) if recent_thoughts else "none"
+        local_time = time.strftime("%H:%M")
         user_context = (
-            f"Current System Context ({OS_SYSTEM}):\n"
-            f"- Active App: {app_name}\n"
-            f"- Window Title: {window_title or 'N/A'}\n"
-            f"- Activity: {activity}\n"
-            f"- Work Streak: {work_streak_min:.0f} mins\n"
-            f"- Companion Energy: {energy}%\n"
-            f"- CPU Load: {cpu}%\n"
-            f"- Idle Seconds: {idle_sec:.0f}s\n"
+            f"Now ({OS_SYSTEM}, local time {local_time}):\n"
+            f"- Active app: {app_name} (for {dwell_min:.0f} min)\n"
+            f"- Window title: {window_title or 'N/A'}\n"
+            f"- Detected activity: {activity} (reflex suggests {reflex_state or 'n/a'})\n"
+            f"- Work streak: {work_streak_min:.0f} min | Energy: {energy}% | CPU: {cpu}% | Idle: {idle_sec:.0f}s\n"
+            f"Recent activity timeline (oldest first):\n{timeline or '- (none)'}\n"
+            f"Recent thoughts (do NOT repeat): {recent}\n"
             "Return JSON now:"
         )
 
@@ -526,33 +710,29 @@ class LMStudioBrain:
         payload = {
             "model": self.model_id,
             "messages": messages,
-            "temperature": 0.4,
-            "max_tokens": 500,
+            "temperature": 0.8,
+            "max_tokens": 300,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "companion_reaction",
+                    "name": "grok_bot_thoughts",
                     "strict": True,
                     "schema": {
                         "type": "object",
                         "properties": {
-                            "poster": {
-                                "type": "string",
-                                "enum": sorted(list(VALID_POSTERS)),
+                            "state": {"type": "string", "enum": sorted(VALID_STATES)},
+                            "theme": {"type": "string", "enum": sorted(VALID_THEMES)},
+                            "thoughts": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": MAX_THOUGHTS,
                             },
-                            "mood": {
-                                "type": "string",
-                                "enum": sorted(list(VALID_MOODS)),
-                            },
-                            "event": {
-                                "type": "string",
-                                "enum": ["none", "sip_coffee", "cheer"],
-                            },
-                            "energy_delta": {
-                                "type": "integer",
-                            },
+                            "mood": {"type": "string", "enum": sorted(VALID_MOODS)},
+                            "event": {"type": "string", "enum": ["none", "sip_coffee", "cheer"]},
+                            "energy_delta": {"type": "integer"},
                         },
-                        "required": ["poster", "mood", "event", "energy_delta"],
+                        "required": ["state", "theme", "thoughts", "mood", "event", "energy_delta"],
                         "additionalProperties": False,
                     },
                 },
@@ -572,66 +752,161 @@ class LMStudioBrain:
 
             if r.status_code == 200:
                 msg_obj = r.json()["choices"][0]["message"]
-                content = (msg_obj.get("content") or "").strip()
-                reasoning = (msg_obj.get("reasoning_content") or "").strip()
-                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                content = re.sub(r"<\|thought\|>.*?<\|thought\|>", "", content, flags=re.DOTALL).strip()
-                m = re.search(r"\{.*?\}", content, flags=re.DOTALL)
-                if not m and reasoning:
-                    m = re.search(r"\{.*?\}", reasoning, flags=re.DOTALL)
-                if m:
-                    return json.loads(m.group(0))
-                else:
-                    print(f"[LM Studio] Raw output (no JSON): content={content[:80]!r}")
-            else:
-                print(f"[LM Studio] HTTP {r.status_code}: {r.text[:150]}")
+                data = parse_llm_json(msg_obj.get("content") or "", msg_obj.get("reasoning_content") or "")
+                if data is None:
+                    print(f"[LM Studio] Raw output (no JSON): {str(msg_obj.get('content'))[:80]!r}")
+                    return None
+                data["thoughts"] = sanitize_thoughts(data.get("thoughts") or data.get("speech") or [])
+                return data
+            print(f"[LM Studio] HTTP {r.status_code}: {r.text[:150]}")
         except Exception as e:
             print(f"[LM Studio] Warning: {e}")
         return None
 
 
-# ─── TIER 1: INSTANT REFLEX CLASSIFIER ──────────────────────────────────────
-def classify_reflex(app_name: str, window_title: str, idle_sec: float, cpu: int, energy: int) -> Tuple[str, str, str]:
+def parse_llm_json(content: str, reasoning: str = "") -> Optional[Dict[str, Any]]:
+    """Extracts the first JSON object from model output (handles <think> blocks and code fences)."""
+    for text in (content, reasoning):
+        if not text:
+            continue
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<\|thought\|>.*?<\|thought\|>", "", text, flags=re.DOTALL)
+        text = text.replace("```json", "").replace("```", "").strip()
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                obj = json.loads(text[start:end + 1])
+                if isinstance(obj, dict):
+                    return obj
+            except ValueError:
+                pass
+    return None
+
+
+class ThoughtEngine:
+    """Runs LLM inference on a background thread.
+
+    The reflex loop calls `update_context()` every tick (cheap) and `trigger()` on meaningful
+    events. The worker wakes up either on a trigger or every `interval` seconds, enforces
+    `min_gap` between calls, and publishes the latest result for `poll()` to pick up.
     """
-    Instant (<5ms) mapping from OS sensors to (activity, mood, wall_poster).
+
+    def __init__(self, brain: "LMStudioBrain", interval: float, min_gap: float = THOUGHT_MIN_GAP_SEC):
+        self.brain = brain
+        self.interval = interval
+        self.min_gap = min_gap
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._ctx: Optional[Dict[str, Any]] = None
+        self._result: Optional[Dict[str, Any]] = None
+        self._last_call = 0.0
+        self.busy = False
+        self._thread = threading.Thread(target=self._run, name="thought-engine", daemon=True)
+
+    def start(self) -> "ThoughtEngine":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def update_context(self, ctx: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ctx = dict(ctx)
+
+    def trigger(self, reason: str = "") -> None:
+        if reason:
+            print(f"[Thoughts] Trigger: {reason}")
+        self._wake.set()
+
+    def poll(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            res, self._result = self._result, None
+        return res
+
+    def _run(self) -> None:
+        # Small delay so the first context snapshot exists before the first call.
+        self._wake.wait(timeout=2.0)
+        while not self._stop.is_set():
+            self._wake.clear()
+            wait = self.min_gap - (time.time() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            with self._lock:
+                ctx = dict(self._ctx) if self._ctx else None
+            if ctx is not None:
+                self.busy = True
+                self._last_call = time.time()
+                t0 = time.time()
+                res = self.brain.analyze_context(**ctx)
+                self.busy = False
+                if res is not None:
+                    res["_latency"] = time.time() - t0
+                    with self._lock:
+                        self._result = res
+            self._wake.wait(timeout=self.interval)
+
+
+# ─── TIER 1: INSTANT REFLEX CLASSIFIER ──────────────────────────────────────
+def classify_reflex(
+    app_name: str, window_title: str, idle_sec: float, cpu: int, energy: int
+) -> Tuple[str, str, str, str, str, str]:
+    """
+    Instant (<5ms) mapping from OS sensors to (activity, mood, poster, state, theme, default_speech).
     """
     app_low = app_name.lower()
     title_low = window_title.lower()
     combined = f"{app_low} {title_low}"
+    now_sec = int(time.time())
 
+    # 1. User is AFK / inactive -> Cyber-Slime melts into a puddle and sleeps
     if idle_sec >= IDLE_SLEEP_THRESHOLD_SEC:
-        return "sleeping", "sleepy", "zzz_dream"
+        return "sleeping", "sleepy", "zzz_dream", "SLEEP", "INDIGO", "ZZZ..."
 
+    # 2. User is resting (45s..180s idle) -> Cyber-Slime lies down & chills
+    if idle_sec >= 45.0:
+        return "idle", "vibing", "chill_play", "CHILL", "EMERALD", "RESTING~"
+
+    # 3. High CPU spike -> Glitch overload!
     if cpu >= 85:
-        return "debugging", "panicking", "fire_panic"
+        return "debugging", "panicking", "fire_panic", "OVERLOAD", "CRIMSON", "CPU 99%!"
 
+    # 4. Debugging errors / crash keywords
     if any(k in combined for k in DEBUG_KEYWORDS):
-        return "debugging", "stressed", "bug_alert"
+        return "debugging", "stressed", "bug_alert", "OVERLOAD", "CRIMSON", "WTF?!"
 
-    if energy < 28:
-        act = "coding" if any(a in app_low for a in CODING_APPS | TERMINAL_APPS) else "idle"
-        return act, "tired", "coffee_need"
-
+    # 5. Celebrating deploy / PR / build success
     if any(k in combined for k in ROCKET_KEYWORDS):
-        return "coding", "happy", "rocket_launch"
+        return "coding", "happy", "rocket_launch", "PARTY", "GOLD", "SHIP IT!"
 
-    if any(a in app_low for a in MUSIC_APPS):
-        return "music", "vibing", "music_eq"
+    # 6. Listening to music or watching video -> Lying down chilling
+    if any(a in app_low for a in MUSIC_APPS) or any(k in combined for k in DISTRACTION_KEYWORDS):
+        return "music", "vibing", "music_eq", "CHILL", "EMERALD", "VIBING~"
 
-    if any(k in combined for k in DISTRACTION_KEYWORDS):
-        return "browsing", "bored", "chill_play"
-
-    if any(k in combined for k in IDEA_KEYWORDS):
+    # 7. Short pause (15s..45s) or reading AI/Docs -> Standing/pacing & thinking with lightbulb!
+    if idle_sec >= 15.0 or any(k in combined for k in IDEA_KEYWORDS):
         act = "coding" if any(a in app_low for a in CODING_APPS) else "browsing"
-        return act, "curious", "brain_idea"
+        return act, "curious", "brain_idea", "THINKING", "VIOLET", "HMM..."
 
-    if any(a in app_low for a in CODING_APPS):
-        return "coding", "focused", "code_matrix"
+    # 8. Low energy or periodic coffee stroll during work (every ~60s takes a 15s coffee walk!)
+    if energy < 35 or (now_sec % 60) < 15:
+        act = "coding" if any(a in app_low for a in CODING_APPS | TERMINAL_APPS) else "browsing"
+        return act, "focused", "coffee_need", "COFFEE", "TEAL", "NEED COFFEE"
 
-    if any(a in app_low for a in TERMINAL_APPS):
-        return "terminal", "focused", "code_matrix"
+    # 9. Active coding or terminal work -> Typing on holographic laptop
+    if any(a in app_low for a in CODING_APPS | TERMINAL_APPS):
+        return "coding", "focused", "code_matrix", "CODING", "CYBER", "DEEP WORK"
 
-    return "browsing", "curious", "zen_mountain"
+    return "browsing", "curious", "zen_mountain", "COFFEE", "TEAL", "SIPPING~"
 
 
 def manage_background_service(install: bool = True) -> None:
@@ -713,7 +988,7 @@ WantedBy=default.target
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RP2040-Zero Cross-Platform Desk-Buddy Daemon")
+    parser = argparse.ArgumentParser(description="RP2040-Zero 3D Cyber-Slime Companion Daemon")
     parser.add_argument("--port", default=None, help="Override serial port (e.g. /dev/ttyACM0, COM3, socket://host.docker.internal:7777)")
     parser.add_argument("--lm-url", default=DEFAULT_LMSTUDIO_URL, help="LM Studio OpenAI API base URL")
     parser.add_argument("--no-vision", action="store_true", help="Use ultra-fast text-only prompts without screenshots")
@@ -731,29 +1006,32 @@ def main():
         return
 
     print("=" * 64)
-    print(f"  🎨 RP2040-ZERO 8-BIT DESK-BUDDY DAEMON ({OS_SYSTEM.upper()})")
+    print(f"  👾 RP2040-ZERO 3D GROK BOT DAEMON ({OS_SYSTEM.upper()})")
     print(f"  LM Studio API : {args.lm_url}")
     print(f"  Vision Mode   : {'Disabled (Text-only)' if args.no_vision else 'Enabled (Auto-fallback)'}")
+    print(f"  Thoughts      : every {args.llm_interval:.0f}s + on events (min gap {THOUGHT_MIN_GAP_SEC:.0f}s)")
     print("=" * 64)
 
     board = BoardSerial(port_override=args.port)
     brain = LMStudioBrain(base_url=args.lm_url, use_vision=not args.no_vision)
+    timeline = ActivityTimeline()
+    engine: Optional[ThoughtEngine] = None
+    if not args.once:
+        engine = ThoughtEngine(brain, interval=args.llm_interval).start()
 
     energy = 95.0
     work_start_ts = time.time()
-    last_llm_ts = 0.0
     last_energy_ts = time.time()
-    last_app = ""
     last_title = ""
+    last_reflex_state = ""
 
-    current_mood = "focused"
-    current_act = "coding"
     current_evt = "none"
-    current_poster = "code_matrix"
-
-    llm_mood_override: Optional[str] = None
-    llm_poster_override: Optional[str] = None
-    llm_override_until: float = 0.0
+    llm_mood: Optional[str] = None
+    llm_state: Optional[str] = None
+    llm_theme: Optional[str] = None
+    llm_thoughts: List[str] = []
+    llm_until: float = 0.0
+    recent_thoughts: deque = deque(maxlen=9)
 
     try:
         while True:
@@ -773,82 +1051,107 @@ def main():
                     work_start_ts = now
             else:
                 energy = max(5.0, energy - (dt / 60.0) * 1.4)
-
             work_streak_min = max(0.0, (now - work_start_ts) / 60.0)
 
             # 3. Tier 1: Fast Reflex classification
-            reflex_act, reflex_mood, reflex_poster = classify_reflex(
+            r_act, r_mood, r_poster, r_state, r_theme, r_speech = classify_reflex(
                 app_name, win_title, idle_sec, cpu, int(energy)
             )
-            current_act = reflex_act
 
-            if (app_name != last_app or win_title != last_title) and app_name != "Unknown":
-                if app_name != last_app:
-                    llm_override_until = 0.0
-                    if 30 <= energy <= 75 and current_act in ("coding", "terminal"):
-                        current_evt = "sip_coffee"
-                last_app = app_name
-                last_title = win_title
+            # 4. Detect meaningful events -> invalidate stale thoughts & wake the LLM immediately
+            trigger_reason = ""
+            if timeline.update(app_name, win_title, now):
+                trigger_reason = f"switched to {app_name}"
+                llm_until = 0.0
+            elif win_title != last_title and r_state in ("OVERLOAD", "PARTY"):
+                trigger_reason = f"title hints {r_state}"
+            if r_state != last_reflex_state:
+                if r_state in ("OVERLOAD", "PARTY", "SLEEP"):
+                    trigger_reason = trigger_reason or f"reflex -> {r_state}"
+                    llm_until = 0.0
+                elif last_reflex_state in ("SLEEP", "CHILL") and idle_sec < 5:
+                    trigger_reason = trigger_reason or "user is back"
+                    llm_until = 0.0
+            if win_title != last_title or r_state != last_reflex_state:
                 print(
                     f"[Reflex] App='{app_name}' Title='{win_title[:35]}' -> "
-                    f"Act={reflex_act} | Poster={reflex_poster} | CPU={cpu}% | NRG={int(energy)}%"
+                    f"State={r_state} | Theme={r_theme} | CPU={cpu}% | Idle={idle_sec:.0f}s"
                 )
+            last_title = win_title
+            last_reflex_state = r_state
 
-            if now < llm_override_until and reflex_act != "sleeping" and cpu < 85:
-                current_mood = llm_mood_override or reflex_mood
-                current_poster = llm_poster_override or reflex_poster
+            ctx = dict(
+                app_name=app_name,
+                window_title=win_title,
+                activity=r_act,
+                energy=int(energy),
+                cpu=cpu,
+                idle_sec=idle_sec,
+                work_streak_min=work_streak_min,
+                timeline=timeline.summary(now),
+                dwell_min=timeline.dwell_minutes(now),
+                recent_thoughts=list(recent_thoughts),
+                reflex_state=r_state,
+            )
+
+            # 5. Tier 2: Thought Engine (async in daemon mode, sync in --once mode)
+            if engine is not None:
+                engine.update_context(ctx)
+                if trigger_reason:
+                    engine.trigger(trigger_reason)
+                res = engine.poll()
             else:
-                current_mood = reflex_mood
-                current_poster = reflex_poster
+                t0 = time.time()
+                res = brain.analyze_context(**ctx)
+                if res is not None:
+                    res["_latency"] = time.time() - t0
 
-            # 4. Tier 2: LM Studio Subconscious (every N seconds)
-            if now - last_llm_ts >= args.llm_interval:
-                last_llm_ts = now
-                res = brain.analyze_context(
-                    app_name=app_name,
-                    window_title=win_title,
-                    activity=current_act,
-                    energy=int(energy),
-                    cpu=cpu,
-                    idle_sec=idle_sec,
-                    work_streak_min=work_streak_min,
+            if res:
+                new_state = str(res.get("state", "")).upper().strip()
+                llm_state = new_state if new_state in VALID_STATES else None
+                new_theme = str(res.get("theme", "")).upper().strip()
+                llm_theme = new_theme if new_theme in VALID_THEMES else None
+                new_mood = str(res.get("mood", "")).lower().strip()
+                llm_mood = new_mood if new_mood in VALID_MOODS else None
+                llm_thoughts = list(res.get("thoughts") or [])
+                recent_thoughts.extend(llm_thoughts)
+                llm_until = now + THOUGHT_TTL_SEC
+
+                new_evt = str(res.get("event", "none")).lower().strip()
+                if new_evt in {"none", "sip_coffee", "cheer"}:
+                    current_evt = new_evt
+                try:
+                    edelta = int(res.get("energy_delta", 0))
+                    energy = max(5.0, min(100.0, energy + max(-5, min(5, edelta))))
+                except Exception:
+                    pass
+                print(
+                    f"[Thoughts] {llm_thoughts} | State={llm_state} | Theme={llm_theme} | "
+                    f"Mood={llm_mood} | {res.get('_latency', 0):.1f}s"
                 )
-                if res:
-                    new_mood = str(res.get("mood", "")).lower().strip()
-                    if new_mood in VALID_MOODS:
-                        llm_mood_override = new_mood
-                        current_mood = new_mood
 
-                    new_poster = str(res.get("poster", "")).lower().strip()
-                    if new_poster in VALID_POSTERS:
-                        llm_poster_override = new_poster
-                        current_poster = new_poster
+            # 6. Merge: reflex safety states (SLEEP/OVERLOAD) always win over the LLM
+            llm_active = now < llm_until
+            if llm_active and r_state not in ("SLEEP", "OVERLOAD"):
+                current_state = llm_state or r_state
+                current_theme = llm_theme or r_theme
+                current_mood = llm_mood or r_mood
+            else:
+                current_state, current_theme, current_mood = r_state, r_theme, r_mood
+            # Empty thoughts -> firmware rotates its built-in phrase pool for the state.
+            thoughts_out = llm_thoughts if llm_active else []
 
-                    llm_override_until = now + 24.0
-
-                    new_evt = str(res.get("event", "none")).lower().strip()
-                    if new_evt in {"none", "sip_coffee", "cheer"}:
-                        current_evt = new_evt
-
-                    try:
-                        edelta = int(res.get("energy_delta", 0))
-                        energy = max(5.0, min(100.0, energy + max(-5, min(5, edelta))))
-                    except Exception:
-                        pass
-
-                    print(
-                        f"[LLM Painting] Poster='{current_poster}' | Mood='{current_mood}' | "
-                        f"Evt='{current_evt}' | NRG={int(energy)}%"
-                    )
-
-            # 5. Send visual state packet to RP2040-Zero
+            # 7. Send state packet to RP2040-Zero
             board.send_state(
                 mood=current_mood,
-                act=current_act,
+                act=r_act,
                 nrg=int(energy),
                 cpu=cpu,
                 evt=current_evt,
-                poster=current_poster,
+                poster=r_poster,
+                state=current_state,
+                theme=current_theme,
+                thoughts=thoughts_out,
             )
             current_evt = "none"
 
@@ -860,6 +1163,9 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[Desk-Buddy] Daemon stopped. See you soon!")
+    finally:
+        if engine is not None:
+            engine.stop()
 
 
 if __name__ == "__main__":
