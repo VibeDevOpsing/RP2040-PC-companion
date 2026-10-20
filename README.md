@@ -1,8 +1,8 @@
 # 🐾 RP2040-Zero 3D Grok Bot Desk Companion
 
-An expressive, **3D volumetric raymarched cyber-bot companion** powered by a **Waveshare RP2040-Zero**, a **0.96" ST7735R IPS display (160×80)**, and a **local LLM** (`google/gemma-4-e2b`, `SmolVLM2`, or `Qwen2.5`) running via **LM Studio** on macOS, Linux, or Windows.
+An expressive, **3D volumetric raymarched desk companion** powered by a **Waveshare RP2040-Zero** and a **0.96" ST7735R IPS display (160×80)**, communicating via USB serial with a cross-platform companion daemon for macOS, Linux, and Windows.
 
-Featuring smooth **Signed Distance Field (SDF) 3D raymarched porcelain-pearl rendering**, sub-pixel anti-aliasing, hardware-composited `displayio.TileGrid` layers (~40 FPS), animated interactive props (3D Coffee Mug, Aluminum Laptop, Idea Lightbulb), and a **high-contrast 6×8 bold comic callout bubble**, Grok Bot acts as an intelligent desk-buddy that reacts live to your active development workflows, CPU spikes, Pomodoro energy, and idle states with real-time AI thoughts and inner monologue.
+Featuring smooth **Signed Distance Field (SDF) 3D raymarched porcelain-pearl rendering**, sub-pixel anti-aliasing, hardware-composited `displayio.TileGrid` layers (~40 FPS), animated interactive props (3D Coffee Mug, Aluminum Laptop, Idea Lightbulb), and a **high-contrast 6×8 bold comic callout bubble**, Grok Bot acts as an expressive desktop companion reacting in real time to your active workflows, CPU load, Pomodoro stamina, and idle states.
 
 ---
 
@@ -11,62 +11,38 @@ Featuring smooth **Signed Distance Field (SDF) 3D raymarched porcelain-pearl ren
 ```mermaid
 flowchart LR
     subgraph Host ["🖥️ Cross-Platform Host Companion (host_companion.py)"]
-        Sensors["Fast Native Sensors (1.5s)<br/>• Frontmost App & Window Title<br/>• CoreGraphics/xprintidle Idle Detection<br/>• CPU Load & Pomodoro Stamina<br/>• Active Terminal & Dev Process Context"]
-        Timeline["Activity Timeline<br/>• Window switches & dwell tracking<br/>• Recent thoughts history (anti-repetition)"]
-        Reflex["⚡ Tier 1: Fast Reflex Engine<br/>Instant (<5ms) state & safety classification"]
-        LLM["🧠 Tier 2: Asynchronous Thought Engine<br/>(google/gemma-4-e2b in LM Studio)<br/>Contextual 1-3 word multi-thought stream"]
+        Sensors["Fast Native Sensors (1.5s)<br/>• Frontmost App & Window Title<br/>• CoreGraphics / xprintidle / win32 Idle Detection<br/>• CPU Load & Pomodoro Stamina<br/>• Active Terminal & Dev Process Context"]
+        Timeline["Activity Timeline<br/>• Window switches & dwell tracking<br/>• Recent status & thought rotation"]
+        Reflex["⚡ Reflex Engine<br/>Instant state & safety classification"]
     end
 
     subgraph RP2040 ["👾 RP2040-Zero + ST7735R (code.py)"]
         Backdrop["🌌 3D Studio Velvet Backdrop<br/>Matte horizon & concentric contact shadow"]
         Bot["🤖 66x75 3D Raymarched Grok Bot<br/>• 20 porcelain shading steps<br/>• 4 walking / sitting / idle poses<br/>• 7 anti-aliased 3D eye expressions"]
         Props["☕ 3D Volumetric Props<br/>Coffee mug + steam, laptop, idea bulb"]
-        Bubble["💬 6x8 Bold Comic Callout Bubble<br/>Ultra-crisp 2px stems, rock-steady layout,<br/>rotates live LLM thought stream every 4.2s"]
+        Bubble["💬 6x8 Bold Comic Callout Bubble<br/>Ultra-crisp 2px stems, rock-steady layout,<br/>rotates live contextual thoughts every 4.2s"]
         LED["🌈 Onboard NeoPixel (GP16)<br/>State-synced organic pulsing"]
     end
 
     Sensors --> Timeline
     Sensors --> Reflex
-    Timeline --> LLM
-    Reflex -->|Serial 115200| RP2040
-    LLM -->|Multi-thought packets (T1~T2~T3)| RP2040
+    Timeline --> Reflex
+    Reflex -->|Serial 115200 (STATE:..|MSG:..)| RP2040
 ```
 
-### How to Read the Scene (Zero Text Clutter!)
+### States, Props & Lighting Themes
 
-1. **🐻‍❄️ Center Stage — 8-Bit Snow Bear / Yeti at the Desk:**
-   - **Scarf Color** reflects the companion's current emotional state:
-     - 🔵 **Blue (`focused`)** — Deep in coding or terminal flow
-     - 🟢 **Emerald (`happy`)** — Productive streak, shipping code, positive balance
-     - 🟣 **Purple (`vibing` + 8-bit headphones)** — Listening to Spotify / Apple Music
-     - ⚪ **Slate Gray (`tired` / `sleepy`)** — Low Pomodoro energy or sleeping (`idle > 3 min`)
-     - 🔴 **Crimson (`stressed` / `panicking` + sweat drop)** — High CPU load (`> 85%`) or debugging errors
-   - **Mechanical Keyboard & Side Monitor:** When you code or type in the terminal, the Yeti's fluffy paws rapidly tap the mechanical keyboard with pixel sparks while code lines scroll on the side monitor.
-   - **Pomodoro Energy Crystal (`x=97..101`):** A compact vertical crystal gauge on the desk shows your remaining stamina (`Green → Gold → Red`). It slowly drains during continuous work and recharges when you step away for a break.
+Grok Bot moves freely across the screen, adapting its body pose, lighting tint, interactive props, and callout bubble:
 
-2. **🎨 Right Wall — Dynamic Thought Painting (`POSTER`):**
-   An ornate gold-trimmed frame (`42×32` canvas) with a gallery lamp above it. Both the fast reflex engine and the local LLM change the painting to visualize what is happening on your Mac:
-
-   | Painting ID (`POSTER`) | Animated 8-Bit Artwork | Context / Trigger |
-   | :--- | :--- | :--- |
-   | `code_matrix` | Falling green Matrix rain + 3D terminal window | Writing code in VS Code / Cursor / Zed or working in Terminal |
-   | `bug_alert` | Flashing crimson alert + wiggling 8-bit beetle & `!` sign | Debugging stack traces, compiler errors, or bug hunting |
-   | `brain_idea` | Glowing golden lightbulb with radiating sparks | Brainstorming with AI, reading documentation, architecture |
-   | `coffee_need` | Steaming espresso cup on a wooden cafe table | Low Pomodoro energy (`< 28%`) — time to grab a coffee break! |
-   | `fire_panic` | Roaring multi-shade pixel flames | Heavy CPU load (`> 85%`), intense compilation, or stress |
-   | `music_eq` | Animated neon equalizer bars | Listening to music / audio apps |
-   | `chill_play` | Retro red monitor with a white `Play` triangle | Watching YouTube, videos, or taking a casual browsing break |
-   | `rocket_launch` | Pixel rocket blasting through stars with exhaust fire | Deploying, opening/merging PRs, or shipping features |
-   | `heart_love` | Beating glossy RPG heart container | Great work-life balance and happy mood |
-   | `zzz_dream` | Starry night sky with golden moon & drifting cloud | Mac is idle (`> 3 min`), companion is sleeping |
-   | `zen_mountain` | Mt. Fuji sunset landscape | Calm reading or peaceful web browsing |
-
-3. **🏔️ Left Wall — Time-of-Day Mountain & Pine Forest Landscape:**
-   A second framed landscape painting (`40×32` canvas) showing snow-capped dual mountain peaks and a tiered evergreen pine forest that automatically matches your local clock (`HOUR:0..23`):
-   - **☀️ Daytime (`07:00 – 17:59`):** Bright blue sky, golden sun, and a slowly drifting white cloud behind the snowy peaks.
-   - **🌅 Sunset (`18:00 – 20:59`):** Warm pink-and-gold evening horizon with a setting sun.
-   - **🌙 Night (`21:00 – 06:59`):** Deep midnight sky with a crescent moon and twinkling stars.
-   - **⚡ CPU Storm (`CPU >= 85%`):** Stormy crimson sky with flashing pixel lightning.
+| State | Action & Props | Eye Expression | Studio Lighting Theme | Context / Trigger |
+| :--- | :--- | :--- | :--- | :--- |
+| `CODING` | Typing on 3D Aluminum Laptop with neon code | Focused capsule eyes (`NORMAL`) | `CYBER` (Cool Studio White-Blue) | Active coding in IDEs, editors, or terminal work |
+| `COFFEE` | Walking & pausing to sip 3D Ceramic Mug with steam | Happy arches (`HAPPY ^ ^`) + Rosy Blush | `TEAL` (Aqua Studio Pearl) | Light browsing, coffee break, or long work streak |
+| `THINKING` | Pacing with chin-hand & floating glowing lightbulb | Inquisitive squint (`THINK`) | `VIOLET` (Lavender-Pearl) | Reading docs, planning, research, or short pauses |
+| `CHILL` | Sitting cozily on the floor with warm mug nearby | Relaxed blinking / happy eyes | `EMERALD` (Mint Studio Pearl) | Listening to music, watching video, or resting |
+| `SLEEP` | Sitting melted on the floor resting | Closed sleep arcs (`SLEEP u u`) | `INDIGO` (Starlight Sleep Pearl) | System idle (`> 3 min`), user AFK |
+| `OVERLOAD` | Jittering panic animation + alert outline | High-alert expression | `CRIMSON` (Alert Rose-Pearl) | Heavy CPU load (`> 85%`), compiler errors, crashes |
+| `PARTY` | Energetic bouncing across the floor | Sleek 3D Cyber-Visor shades | `GOLD` (Warm Solar Cream-Pearl) | Deploying, merging PRs, build successes |
 
 ---
 
@@ -97,35 +73,21 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | **USB Serial Port** | USB VID `0x2E8A` / `/dev/cu.usbmodem*` | USB VID `0x2E8A` / `/dev/ttyACM*` | USB VID `0x2E8A` / `COM*` |
 | **Active Window & App** | `osascript` (`System Events`) | `hyprctl` (Hyprland), `swaymsg` (Sway), `xdotool`/`xprop` (X11) | `ctypes.windll.user32` (`GetForegroundWindow`) |
-| **Idle Time Sensor** | `ioreg -c IOHIDSystem` (`HIDIdleTime`) | `xprintidle` (X11) / `gdbus` (`Mutter.IdleMonitor`) | `ctypes.windll.user32.GetLastInputInfo` |
-| **Screenshot (Vision)** | `Pillow.ImageGrab` / `screencapture` + `sips` | `Pillow.ImageGrab` / `grim` / `scrot` / `gnome-screenshot` | `Pillow.ImageGrab` |
+| **Idle Time Sensor** | `CoreGraphics` ctypes / `IOHIDSystem` | `xprintidle` (X11) / `gdbus` (`Mutter.IdleMonitor`) | `ctypes.windll.user32.GetLastInputInfo` |
+| **CPU Usage** | `psutil` / `os.getloadavg()` | `psutil` / `os.getloadavg()` | `psutil` |
 
 ---
 
 ## 🚀 Quick Start
 
 ### 1. Flash the RP2040-Zero Firmware
-1. Install **CircuitPython 9.x** for **Waveshare RP2040-Zero** (available in [GitHub Releases](../../releases) as `circuitpython-waveshare-rp2040-zero.uf2`).
-2. Make sure `adafruit_st7735r` and `neopixel` are in `CIRCUITPY/lib/`.
+1. Install **CircuitPython 9.x** for **Waveshare RP2040-Zero** (e.g. `adafruit-circuitpython-waveshare_rp2040_zero-en_US-9.2.4.uf2`).
+2. Make sure `adafruit_st7735r` is in `CIRCUITPY/lib/`.
 3. Copy [`code.py`](file:///Users/booo/projects/embeded/esp32-activity-pet/code.py) to the root of your `CIRCUITPY` drive.
 
-### 2. Start LM Studio Local Server
-1. Open **LM Studio** (macOS, Linux, or Windows).
-2. Load a lightweight 1B–2B Vision or Text model (recommended: **`google/gemma-4-e2b`** or **`SmolVLM2-2.2B-Instruct`**).
-3. Start the **Local Server** on port `1234` (`http://127.0.0.1:1234/v1`).
+### 2. Run the Host Daemon
 
-### 3. Run the Host Daemon
-**Option A — Using pre-built release artifacts from [Releases](../../releases):**
-```bash
-# Standalone Linux binary:
-chmod +x ./desk-buddy-host-linux-x86_64
-./desk-buddy-host-linux-x86_64
-
-# Universal executable bundle (macOS / Linux / Windows):
-python3 ./desk-buddy-host-universal.pyz
-```
-
-**Option B — Running from Python source (macOS / Linux / Windows):**
+**Running from Python source (macOS / Linux / Windows):**
 ```bash
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -133,7 +95,7 @@ pip install -r requirements.txt
 python host_companion.py
 ```
 
-**Option C — Install as an Automatic Background Service (macOS `launchd` / Linux `systemd`):**
+**Install as an Automatic Background Service (macOS `launchd` / Linux `systemd`):**
 ```bash
 # Starts automatically on login and restarts if unplugged/replugged:
 python3 host_companion.py --install-service
@@ -142,55 +104,40 @@ python3 host_companion.py --install-service
 python3 host_companion.py --uninstall-service
 ```
 
-**Option D — Running in Docker (`Dockerfile` + `docker-compose.yml`):**
+**Running in Docker (`Dockerfile` + `docker-compose.yml`):**
 ```bash
-# Native USB & X11 passthrough on Linux (or TCP serial bridge on macOS/Windows):
 docker compose up -d --build
 ```
 
 #### Useful CLI Flags:
 - `--port /dev/ttyACM0` (or `--port COM3`) — Override automatic serial port detection.
-- `--once` — Run a single sensor + LLM cycle and exit (great for testing).
-- `--no-vision` — Disable screenshots and run in ultra-lightweight text-only mode (uses window titles & system metrics only).
-- `--llm-interval 25` — Customize seconds between LLM subconscious checks (reflexes always run every `1.5s`).
-- `--lm-url http://127.0.0.1:1234/v1` — Custom OpenAI-compatible local server URL.
+- `--once` — Run a single sensor cycle and exit (great for testing).
+- `--no-vision` — Disable screenshot capture in background.
 
 ---
 
-## ⚙️ CI/CD & How to Configure Your GitHub Repository
+## 🛠️ Offline Assets & Firmware Generation
 
-This repository includes an automated GitHub Actions pipeline in [`.github/workflows/release.yml`](file:///Users/booo/projects/embeded/esp32-activity-pet/.github/workflows/release.yml) running on **`ubuntu-latest` with `python-version: "3.x"` (latest Python)** that:
-1. Validates Python syntax for both `code.py` and `host_companion.py`.
-2. **Automatically creates and pushes a semantic Git tag (`vX.Y.Z`)** whenever features/fixes are pushed or merged into `main`:
-   - Commits starting with `feat:` or containing `feature` / `add` bump the **minor** version (`v1.1.0`, `v1.2.0`, …).
-   - Commits containing `BREAKING CHANGE` or `!:` bump the **major** version (`v2.0.0`).
-   - All other code commits bump the **patch** version (`v1.0.1`, `v1.0.2`, …).
-3. Compiles [`host_companion.py`](file:///Users/booo/projects/embeded/esp32-activity-pet/host_companion.py) into a **standalone Linux binary (`desk-buddy-host-linux-x86_64`)** via `PyInstaller` and a **universal cross-platform executable (`desk-buddy-host-universal.pyz`)**.
-4. Packages the RP2040-Zero firmware (`rp2040-zero-desk-buddy-firmware.zip` + CircuitPython `.uf2` + `SHA256SUMS.txt`) and **publishes a new GitHub Release** automatically.
+To regenerate the 3D raymarched tiles, palette, and firmware:
 
-### Required GitHub Repository Setup (3 Simple Steps):
-1. **Create a GitHub repository** and push your `main` branch:
-   ```bash
-   git add .
-   git commit -m "feat: initial 8-bit Snow Bear Desk-Buddy and Gemma 4 E2B daemon"
-   git branch -M main
-   git remote add origin https://github.com/<your-username>/<your-repo>.git
-   git push -u origin main
-   ```
-2. **Enable Workflow Write Permissions** (so GitHub Actions is allowed to create tags and publish Releases):
-   - Go to your repository on GitHub → **Settings** → **Actions** → **General**.
-   - Scroll down to **Workflow permissions**.
-   - Select **"Read and write permissions"** and click **Save**.
-3. **Triggering Releases:**
-   - Every push or merged Pull Request to `main` that modifies code files (`code.py`, `host_companion.py`, `requirements.txt`, etc.) will automatically tag the commit, build the binary on macOS, and publish a GitHub Release.
-   - You can also trigger a release manually at any time under the **Actions** tab → **Build & Release Desk-Buddy** → **Run workflow** (with a dropdown to choose `auto`, `minor`, `patch`, or `major`).
+```bash
+python3 tools/generate_3d_firmware.py -o code.py
+```
+
+This runs the analytical Signed Distance Field (SDF) raymarcher and builds `code.py` with pre-computed sprite matrices and font lookups.
 
 ---
 
-## 🤝 Contributing, Ideas & Collaboration
+## ⚙️ Testing
 
-Have a cool idea for a new 8-bit wall painting, a new character skin, additional system sensors, or support for other microcontrollers (ESP32, Pico W, etc.)? **Contributions of all kinds are warmly welcome!**
+Run the test suite covering protocol encoding, thought formatting, bubble layout, and asset integrity:
 
-- 💡 **Got an idea or feature request?** Open an [Issue](../../issues) or start a discussion to share your thoughts!
-- 🛠️ **Want to build and contribute directly?** Feel free to fork the repository and open a **Pull Request (PR)** — whether it's a new pixel-art sprite, a new poster scene, or a host daemon improvement.
-- 💬 **Want to collaborate or brainstorm together?** Reach out directly via GitHub Issues/Discussions or contact the author — let's build the coziest open-source desk companion together!
+```bash
+python3 -m unittest discover -s tests
+```
+
+---
+
+## 🤝 Contributing
+
+Contributions of all kinds are welcome! Feel free to open an issue or pull request for new poses, animations, sensors, or hardware platform ports.
