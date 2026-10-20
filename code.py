@@ -2,15 +2,15 @@ import board
 import displayio
 import busio
 import digitalio
+import gc
 import supervisor
 import sys
 import time
-import math
 from fourwire import FourWire
 from adafruit_st7735r import ST7735R
 
 try:
-    import neopixel
+    from neopixel_write import neopixel_write
     HAS_NEOPIXEL = True
 except ImportError:
     HAS_NEOPIXEL = False
@@ -33,813 +33,1178 @@ display = ST7735R(
     auto_refresh=False
 )
 
-led = None
-if HAS_NEOPIXEL and hasattr(board, "GP16"):
+led_pin = None
+led_buf = bytearray(3)
+_last_led_rgb = (-1, -1, -1)
+if HAS_NEOPIXEL:
     try:
-        led = neopixel.NeoPixel(board.GP16, 1, brightness=0.18, auto_write=False)
-        led[0] = (0, 80, 160)
-        led.show()
+        pin_obj = getattr(board, "NEOPIXEL", getattr(board, "GP16", None))
+        if pin_obj is not None:
+            led_pin = digitalio.DigitalInOut(pin_obj)
+            led_pin.direction = digitalio.Direction.OUTPUT
+            led_buf[0] = 30
+            led_buf[1] = 0
+            led_buf[2] = 55
+            neopixel_write(led_pin, led_buf)
     except Exception:
-        led = None
+        led_pin = None
 
-# ─── 2. CRISP 8-BIT PICO-8 / NES INSPIRED PALETTE (32 COLORS) ───────────────
-NUM_COLORS = 32
-bg_bmp = displayio.Bitmap(160, 80, NUM_COLORS)
-fg_bmp = displayio.Bitmap(160, 80, NUM_COLORS)
+# ─── 2. 64-COLOR 3D RAYMARCHED STUDIO PALETTE & HARDWARE TILEGRIDS ──────────
+NUM_COLORS = 64
+ALPHA = ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#"
+CHAR_TO_IDX = {ch: i for i, ch in enumerate(ALPHA)}
+SIN_64 = (0.000, 0.098, 0.195, 0.290, 0.383, 0.471, 0.556, 0.634, 0.707, 0.773, 0.831, 0.882, 0.924, 0.957, 0.981, 0.995, 1.000, 0.995, 0.981, 0.957, 0.924, 0.882, 0.831, 0.773, 0.707, 0.634, 0.556, 0.471, 0.383, 0.290, 0.195, 0.098, 0.000, -0.098, -0.195, -0.290, -0.383, -0.471, -0.556, -0.634, -0.707, -0.773, -0.831, -0.882, -0.924, -0.957, -0.981, -0.995, -1.000, -0.995, -0.981, -0.957, -0.924, -0.882, -0.831, -0.773, -0.707, -0.634, -0.556, -0.471, -0.383, -0.290, -0.195, -0.098)
+
+BASE_PALETTE = (
+    0x0A0D16, 0x0D111D, 0x121726, 0x161D2E, 0x626C80, 0x70798C, 0x7B8494, 0x858D9D, 0x8F96A4, 0x979EAB, 0xA0A6B2, 0xA8AEB9, 0xB0B5BF, 0xB8BCC5, 0xBFC3CB, 0xC7CAD2,
+    0xCED1D7, 0xD5D8DD, 0xDCDFE3, 0xE3E5E9, 0xEAECEE, 0xF1F2F4, 0xF8F8F9, 0xFFFFFF, 0x202533, 0x343A49, 0x484F5F, 0x5C6475, 0xA4AEBE, 0x767E8E, 0x424755, 0x1C1F28,
+    0x04060A, 0x1D222F, 0x343E54, 0xF488A6, 0x07090F, 0x0C101A, 0x111725, 0x341B0E, 0x6E3C1C, 0xBC804C, 0xAF101E, 0xDC2636, 0xFA5260, 0x1C2636, 0x3A485E, 0x64748B,
+    0x94A3B8, 0x064E3B, 0x10B981, 0x4EFF9B, 0xB45309, 0xF59E0B, 0xFDE047, 0xFEF9C3, 0x38BDF8, 0xA855F7, 0xD4DEEC, 0xF1F5F9, 0xFFFFFF, 0x26344A, 0x96A8C2, 0xDAE4F2,
+)
 
 bg_pal = displayio.Palette(NUM_COLORS)
 fg_pal = displayio.Palette(NUM_COLORS)
-
-COLORS = [
-    0x06070C,  # 0: Crisp 8-bit Black Outline (Transparent on FG)
-    0x111526,  # 1: Wall dark navy brick
-    0x1A2038,  # 2: Wall mid indigo
-    0x262F52,  # 3: Wall highlight / mortar
-    0x06070C,  # 4: Solid black (for FG drawing where 0 is transparent!)
-    0x211209,  # 5: Deep wood shadow
-    0x452614,  # 6: Dark walnut wood
-    0x784727,  # 7: Warm oak wood
-    0xAD6E3E,  # 8: Bright wood bevel edge
-    0x99B2CC,  # 9: Yeti/Bear fur deep shadow (cool ice-gray)
-    0xCFE2F5,  # 10: Yeti/Bear fur mid-shadow (soft frost blue-white)
-    0xFFFFFF,  # 11: Yeti/Bear pure snow white fur
-    0x38170D,  # 12: Dark coffee / dark brown
-    0x85371E,  # 13: Terracotta pot / chair leather shadow
-    0xCC5A33,  # 14: Terracotta highlight / chair leather
-    0x1D4ED8,  # 15: Scarf / Bandana shadow (changes with mood)
-    0x3B82F6,  # 16: Scarf / Bandana main (changes with mood)
-    0x7DD3FC,  # 17: Yeti horns / ice cyan highlight
-    0x27303F,  # 18: Dark monitor/keyboard casing
-    0x55647A,  # 19: Medium gray plastic/metal
-    0x9BA9BD,  # 20: Light gray keycaps / silver monitor edge
-    0x0C4A2B,  # 21: Dark cactus / forest green
-    0x199E56,  # 22: Mid emerald green
-    0x4EFF9B,  # 23: Bright 8-bit neon green (code / hills)
-    0x0A1936,  # 24: Night sky deep blue
-    0x2563EB,  # 25: Day sky upper blue
-    0x60B5FF,  # 26: Day sky bright cyan-blue
-    0x7F1124,  # 27: Dark crimson
-    0xEF2B41,  # 28: Bright 8-bit red (mug / heart / alert)
-    0xFF82A9,  # 29: Cute cheek blush pink / sunset pink
-    0xFFCC22,  # 30: Bright 8-bit gold / sun / frame
-    0xFFFFFF,  # 31: Pure crisp white
-]
-
-for idx, col in enumerate(COLORS):
-    bg_pal[idx] = col
-    fg_pal[idx] = col
-
+for i, col in enumerate(BASE_PALETTE):
+    bg_pal[i] = col
+    fg_pal[i] = col
 fg_pal.make_transparent(0)
 
+# Subtle 3D Studio Lighting Tint Themes (tints the 20 porcelain shades 4..23!)
+STUDIO_TINTS = {
+    "CYBER":   (0, 2, 6),      # Cool Studio White-Blue
+    "VIOLET":  (4, -2, 10),    # Kiro Lavender-Pearl
+    "TEAL":    (-4, 4, 6),     # Aqua Studio Pearl
+    "EMERALD": (-4, 6, 2),     # Mint Studio Pearl
+    "INDIGO":  (-6, -4, 12),   # Starlight Sleep Pearl
+    "CRIMSON": (16, -8, -6),   # Warm Alert Rose-Pearl
+    "GOLD":    (12, 6, -6),    # Warm Solar Cream-Pearl
+}
+
+_active_theme = None
+
+def apply_slime_theme(theme_name):
+    """Updates 3D porcelain palette ONLY when theme changes to avoid full-screen SPI dirty redraws."""
+    global _active_theme
+    if theme_name == _active_theme:
+        return
+    _active_theme = theme_name
+    dr, dg, db = STUDIO_TINTS.get(theme_name, (0, 2, 6))
+    for i in range(20):
+        base = BASE_PALETTE[4 + i]
+        r = max(0, min(255, ((base >> 16) & 0xFF) + dr))
+        g = max(0, min(255, ((base >> 8) & 0xFF) + dg))
+        b = max(0, min(255, (base & 0xFF) + db))
+        fg_pal[4 + i] = (r << 16) | (g << 8) | b
+
+# Allocate Hardware-Composited TileGrid Layers (Zero per-frame full-screen redraw!)
+bg_bmp = displayio.Bitmap(160, 80, 4)
+shadow_bmp = displayio.Bitmap(56, 8, NUM_COLORS)
+bot_bmp = displayio.Bitmap(66 * 4, 75, NUM_COLORS)
+eyes_bmp = displayio.Bitmap(32 * 7, 20, NUM_COLORS)
+prop_bmp = displayio.Bitmap(32 * 6, 24, NUM_COLORS)
+callout_bmp = displayio.Bitmap(88, 28, NUM_COLORS)
+
 bg_grid = displayio.TileGrid(bg_bmp, pixel_shader=bg_pal)
-fg_grid = displayio.TileGrid(fg_bmp, pixel_shader=fg_pal)
+shadow_grid = displayio.TileGrid(shadow_bmp, pixel_shader=fg_pal, x=10, y=71)
+bot_grid = displayio.TileGrid(bot_bmp, pixel_shader=fg_pal, width=1, height=1, tile_width=66, tile_height=75, x=4, y=2)
+eyes_grid = displayio.TileGrid(eyes_bmp, pixel_shader=fg_pal, width=1, height=1, tile_width=32, tile_height=20, x=21, y=18)
+prop_grid = displayio.TileGrid(prop_bmp, pixel_shader=fg_pal, width=1, height=1, tile_width=32, tile_height=24, x=46, y=30)
+callout_grid = displayio.TileGrid(callout_bmp, pixel_shader=fg_pal, x=70, y=10)
 
 root_group = displayio.Group()
 root_group.append(bg_grid)
-root_group.append(fg_grid)
+root_group.append(shadow_grid)
+root_group.append(bot_grid)
+root_group.append(eyes_grid)
+root_group.append(prop_grid)
+root_group.append(callout_grid)
 display.root_group = root_group
 
-# ─── 3. 8-BIT DRAWING PRIMITIVES ────────────────────────────────────────────
-def fill_rect(b, x, y, w, h, c):
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(160, x + w)
-    y1 = min(80, y + h)
-    for py in range(y0, y1):
-        for px in range(x0, x1):
-            b[px, py] = c
+# ─── 3. PRE-RAYMARCHED 3D STUDIO ASSETS (66x75 GIANT BOT!) ──────────────────
+BOT_STAND = (
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "...........................OPQ99AAA98QPO..........................",
+    "........................NP9ABCCCDDCCCBBA8PN.......................",
+    ".......................PABCDDEEEEEEEEDDCBA9P......................",
+    ".....................P9BCDEEFGGGGGGGFFEEDCCA8P....................",
+    "....................QACDEFGGGHHHIHHHGGGFFEDCB9Q...................",
+    "...................QBCDEFGHHIJJJJJIIIHHGFFEDCB9Q..................",
+    "..................8BCEEGGIIJJKKKKKKJJIIHHGFEDCBA6.................",
+    ".................QBCDFGHIJJKLLLMMMLLKJJIHHGFEECB9Q................",
+    "................PACDFGHIJKLLMMMMMMMMLKKJIHHGFEDCB9P...............",
+    "...............O9BDEFHIJKLMMMMMMMMMMMLKKJIHGGFEDCA8O..............",
+    "...............8BCEFGHIJKMMMMMMMMMMMMMLKJJIHGFEDCB96..............",
+    "..............PABDEFHIJKLMMMMMMMMMMMMMLKKJIHHGFEDCA8P.............",
+    "..............8ACEFGHIJLMMMMMMMMMMMMMMLLKJIIHGFEDCB96.............",
+    ".............O9BDEFGHIKLMMMMMMMMMMMMMMMLKJJIHGGFEDBA8O............",
+    ".............QACDEGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCA8Q............",
+    ".............8ACDEGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCA96............",
+    "............O9BCEFGHIJKLMMMMMMMMMMMMMMLLKJJIHHGFEDCB97O...........",
+    "............P9BCEFGHIJKKLMMMMMMMMMMMMMLKKJJIHHGFEDCB97P...........",
+    "............Q9BCEFGHIIJKLMMMMMMMMMMMMLLKKJIIHHGFEDCB97Q...........",
+    "............Q9BCDFGGHIJKKLMMMMMMMMMMLLKKJJIIHGGFEDCB97Q...........",
+    "............59BCDEFGHIJJKKLLMMMMMMMLLKKKJJIHHGGFEDCB975...........",
+    "............69BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............69BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............59BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............59BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB974...........",
+    "............58BCDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB974...........",
+    "............47BCDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB964...........",
+    "............47ACDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB964...........",
+    "...........O57ACDFFHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB864O..........",
+    "..........P5569CDFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB8555P.........",
+    "........P677669CDFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB856776P.......",
+    ".......Q8899758CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB7578877Q......",
+    "......P9AABA858CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA75799998P.....",
+    "......7ABBBB958CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758AA9A96.....",
+    ".....O9BBBBB958BEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA7589A9AA7O....",
+    ".....PABBAAA958BEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999AA9P....",
+    ".....8BCBAA9958CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999ABA6....",
+    "....O9CCCAA9858CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA757999BBA8O...",
+    "....PBCCCAA9859CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHHGFEDDB857999BBBAP...",
+    "....8CDDCAA9769DEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB857999BCCA6...",
+    "...OADDDCAA9769DEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB856999BCCB8O..",
+    "...PCEEDCAA977ADEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB966999BCDCAP..",
+    "...8DEEECA9967ADEFGHIIJKKLLMMMMMMMMLLLKKJJIIHHGFEEDB966899BCDDB6..",
+    "..OAEFFECA9968BDEFGHIIJKKLLMMMMMMMMLLLKKJJIIHHGFEEDBA75999BDDDC8O.",
+    "..PCFFFEB99958BDEFGHHIJJKKLLLMMMMLLLLKKKJJIIHGGFEDDBA75899BDEEDAP.",
+    "..7DGGGEB99858BDEFFGHIIJJKKKLLLLLLLKKKKJJIIHHGGFEDCB974899BDEFEB5.",
+    ".N9DHHGEB99858BCDEFGHHIIJJJKKKKKKKKKKJJJIIHHGGFFEDCB974899BDFFFC8N",
+    ".O9EHHGEB99858BCDEFGGHHIIJJJKKKKKKKJJJJIIHHHGFFEDCCA974899BEFGFD8O",
+    ".O8DGGGEB99857ACCEEFGGHHIIIJJJJJJJJJJIIIHHHGGFEEDCBA964899BEFFEC7O",
+    "..7BEFEDB98857ABCDEEFGGHHIIIIJJJJJJIIIIHHHGGFFEDCCBA964889BCEED97.",
+    "..Q9CDCB987757ABCDDEFFGGHHHIIIIIIIIIIHHHGGGFFEDDCBAA865788ABCCB8Q.",
+    "..N69BAA8766569BBCDDEFFGGGHHHHHHHHHHHHHGGGFFEEDCBAA986566789AA97N.",
+    "...O67877555468ABBCDDEFFFGGGHHHHHHHHGGGGFFFEEDCCBAA975455677887O..",
+    "....OQ665543358ABBCCDDEFFFFGGGGGGGGGGGFFFEEEDCCBAAA9754344566QO...",
+    "......OOPON.P58ABBBCCDDEEFFFFFFGGGFFFFFEEEDDCCBAAA9975P.NOPOO.....",
+    ".............58ABBBCCCDDDEEEFFFFFFFFFEEEDDCCBBAAAA9975............",
+    ".............Q7ABBCCCCCCDDDEEEEEEEEEEEDDDCCBBAAAAA997Q............",
+    ".............P79BBCCCCBBCCCDDDDDDDDDDDDCCBBAABBBBA987P............",
+    ".............O79BCCCCCCBBBCCCCCCDDDCCCCBBBABBBBBBA987O............",
+    "..............69BCDDDDCCBBBBBBBCCBBBBBBAAABBBCCCBB986.............",
+    "..............Q9BCDEEDDDCBBAAABBBBBAAAAAABBCCCDCCBA8Q.............",
+    "..............P8BCDEEEEDCCBAA99AAAA9999ABBCCDDDCCB98P.............",
+    "..............O7ACDDEEEDDCBBA998888899AABCCDDDDCBA97O.............",
+    "...............59BCDDDDDCCBA98877777889ABCCCDDCCB986..............",
+    "...............O79BCCDDCCBA9876665666789ABCCCCBBA97O..............",
+    "................Q79ABBCCBA9866554Q3555689ABBBBA998Q...............",
+    "................N5789AAA987665QPO.OPQ456789AA99886N...............",
+    ".................N46788876655P.......P45567898875N................",
+    "...................P56766554O.........O35566776P..................",
+    ".....................OPQQPPN...........NPPQQPO....................",
+    "..................................................................",
+    "..................................................................",
+)
+BOT_STEP_L = (
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "...........................OPQ99AAA98QPO..........................",
+    "........................NP9ABCCCDDCCCBBA8PN.......................",
+    ".......................PABCDDEEEEEEEEDDCBA9P......................",
+    ".....................P9BCDEEFGGGGGGGFFEEDCCA8P....................",
+    "....................QACDEFGGGHHHIHHHGGGFFEDCB9Q...................",
+    "...................QBCDEFGHHIJJJJJIIIHHGFFEDCB9Q..................",
+    "..................8BCEEGGIIJJKKKKKKJJIIHHGFEDCBA6.................",
+    ".................QBCDFGHIJJKLLLMMMLLKJJIHHGFEECB9Q................",
+    "................PACDFGHIJKLLMMMMMMMMLKKJIHHGFEDCB9P...............",
+    "...............O9BDEFHIJKLMMMMMMMMMMMLKKJIHGGFEDCA8O..............",
+    "...............8BCEFGHIJKMMMMMMMMMMMMMLKJJIHGFEDCB96..............",
+    "..............PABDEFHIJKLMMMMMMMMMMMMMLKKJIHHGFEDCA8P.............",
+    "..............8ACEFGHIJLMMMMMMMMMMMMMMLLKJIIHGFEDCB96.............",
+    ".............O9BDEFGHIKLMMMMMMMMMMMMMMMLKJJIHGGFEDBA8O............",
+    ".............QACDEGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCA8Q............",
+    ".............8ACDEGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCA96............",
+    "............O9BCEFGHIJKLMMMMMMMMMMMMMMLLKJJIHHGFEDCB97O...........",
+    "............P9BCEFGHIJKKLMMMMMMMMMMMMMLKKJJIHHGFEDCB97P...........",
+    "............Q9BCEFGHIIJKLMMMMMMMMMMMMLLKKJIIHHGFEDCB97Q...........",
+    "............Q9BCDFGGHIJKKLMMMMMMMMMMLLKKJJIIHGGFEDCB97Q...........",
+    "............59BCDEFGHIJJKKLLMMMMMMMLLKKKJJIHHGGFEDCB975...........",
+    "............69BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............69BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............59BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............59BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB974...........",
+    "............58BCDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB974...........",
+    "............47BCDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB964...........",
+    "............47ACDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB964...........",
+    "...........O57ACDFFHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB864O..........",
+    "..........P5569CDFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB8555P.........",
+    "........P677669CDFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB856776P.......",
+    ".......Q8899758CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB7578877Q......",
+    "......P9AABA858CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA75799998P.....",
+    "......7ABBBB958CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758AA9A96.....",
+    ".....O9BBBBB958BEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA7589A9AA8O....",
+    ".....PABBAAA958BEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999AA9Q....",
+    ".....7BBBAA9958CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999ABA8N...",
+    "....N9BCBAAA858CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA757999BBB9P...",
+    "....OACCCAAA859CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHHGFEDDB857999BCCA5...",
+    "....QBCCCAA9769DEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB857999BCCB9O..",
+    "....8CDDCAA9769DEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB857999BCDDBQ..",
+    "...OACDDCAA977ADEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB966899BDDDC7..",
+    "...PBDEDCAA967ADEFGHIIJKKLLMMMMMMMMLLLKKJJIIHHGFEEDB975999BDEED9P.",
+    "...QCEEDCAA968BDEFGHIIJKKLLMMMMMMMMLLLKKJJIIHHGFEEDBA75899BDEEEBQ.",
+    "...9DEEDBA9968BDEFGHHIJJKKLLLMMMMLLLLKKKJJIIHGGFEDDBA75899BDEFFC8.",
+    "..OAEFFEBA9958BDEFFGHIIJJKKKLLLLLLLKKKKJJIIHHGGFEDCBA74899BDFGFD8O",
+    "..PCFGFEC99958BCDEFGHHIIJJJKKKKKKKKKKJJJIIHHGGFFEDCBA74899BDFFEC7O",
+    "..8DGGGEC99857ACDEFGGHHIIJJJKKKKKKKJJJJIIHHHGFFEDCCA974799ACDEDA7.",
+    ".N9EHHGFC99957ACCEEFGGHHIIIJJJJJJJJJJIIIHHHGGFEEDCBA9747889BCCB9Q.",
+    ".O9EHIHFCA9957ABCDEEFGGHHIIIIJJJJJJIIIIHHHGGFFEDCCBA96466789AA97O.",
+    ".O8DGHGFC999669BCDDEFFGGHHHIIIIIIIIIIHHHGGGFFEDDCBAA96455567787P..",
+    "..7BEFFDB988669BBCDDEFFGGGHHHHHHHHHHHHHGGGFFEEDCBAA98644445665O...",
+    "..Q9CDDCA877658ABBCDDEFFFGGGHHHHHHHHGGGGFFFEEDCCBAA9864OOPPPO.....",
+    "..N59BBA9766557ABBCCDDEFFFFGGGGGGGGGGGFFFEEEDCCBAAA986P...........",
+    "...O57887655447ABBBCCDDEEFFFFFFGGGFFFFFEEEDDCCBAAA9986O...........",
+    "....NQ66554QP47ABBBBCCDDDEEEFFFFFFFFFEEEDDCCBBAAAA9985............",
+    ".......OOO...Q69ABBCCCCCDDDEEEEEEEEEEEDDDCCBBAAAAA998Q............",
+    ".............P69ABBBBBBBCCCDDDDDDDDDDDDCCBBAABBBBA987P............",
+    "..............58AABBBBBBBBCCCCCCDDDCCCCBBBABBBBBBA987O............",
+    "..............P79ABBBBBBBABBBBBCCBBBBBBAAABBBCCCBBA87.............",
+    "...............579AABBBAAAAAAABBBBBAAAAAABBCCDDCCBA8Q.............",
+    "...............O6799AAAAAA99999AAAA999AABCCDDEEDDBA8P.............",
+    "................P578999999998888888899ABCCDEEEEDCB98P.............",
+    ".................P56788887777766777789ABCDDEEEEDCB97N.............",
+    "..................O56777666655555566689ABDDEEEDCBA85..............",
+    "....................P555555544QPQQ456689ACDDDDCBA97P..............",
+    "......................NOPQQPO....NOP45689ABCCCBA985...............",
+    "....................................O356789AAA9986O...............",
+    ".....................................OQ5577899886O................",
+    "......................................OQ4566777Q..................",
+    "........................................PQ44QPN...................",
+    "..................................................................",
+)
+BOT_STEP_R = (
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "...........................OPQ99AAA98QPO..........................",
+    "........................NP9ABCCCDDCCCBBA8PN.......................",
+    ".......................PABCDDEEEEEEEEDDCBA9P......................",
+    ".....................P9BCDEEFGGGGGGGFFEEDCCA8P....................",
+    "....................QACDEFGGGHHHIHHHGGGFFEDCB9Q...................",
+    "...................QBCDEFGHHIJJJJJIIIHHGFFEDCB9Q..................",
+    "..................8BCEEGGIIJJKKKKKKJJIIHHGFEDCBA6.................",
+    ".................QBCDFGHIJJKLLLMMMLLKJJIHHGFEECB9Q................",
+    "................PACDFGHIJKLLMMMMMMMMLKKJIHHGFEDCB9P...............",
+    "...............O9BDEFHIJKLMMMMMMMMMMMLKKJIHGGFEDCA8O..............",
+    "...............8BCEFGHIJKMMMMMMMMMMMMMLKJJIHGFEDCB96..............",
+    "..............PABDEFHIJKLMMMMMMMMMMMMMLKKJIHHGFEDCA8P.............",
+    "..............8ACEFGHIJLMMMMMMMMMMMMMMLLKJIIHGFEDCB96.............",
+    ".............O9BDEFGHIKLMMMMMMMMMMMMMMMLKJJIHGGFEDBA8O............",
+    ".............QACDEGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCA8Q............",
+    ".............8ACDEGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCA96............",
+    "............O9BCEFGHIJKLMMMMMMMMMMMMMMLLKJJIHHGFEDCB97O...........",
+    "............P9BCEFGHIJKKLMMMMMMMMMMMMMLKKJJIHHGFEDCB97P...........",
+    "............Q9BCEFGHIIJKLMMMMMMMMMMMMLLKKJIIHHGFEDCB97Q...........",
+    "............Q9BCDFGGHIJKKLMMMMMMMMMMLLKKJJIIHGGFEDCB97Q...........",
+    "............59BCDEFGHIJJKKLLMMMMMMMLLKKKJJIHHGGFEDCB975...........",
+    "............69BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............69BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............59BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB975...........",
+    "............59BCDEFGHIIJJKKLLLMMMLLLLKKJJIIHHGFEEDCB974...........",
+    "............58BCDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB974...........",
+    "............47BCDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB964...........",
+    "............47ACDFFGHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB964...........",
+    "...........O57ACDFFHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB864O..........",
+    "..........P5569CDFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB8555P.........",
+    "........P677669CDFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB856776P.......",
+    ".......Q8899758CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCB7578877Q......",
+    "......P9AABA858CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA75799998P.....",
+    "......7ABBBB958CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758AA9A96.....",
+    ".....O9BBBBB958BEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA7589A9AA7O....",
+    ".....QABBAAA958BEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999AA9P....",
+    "....N9BCBAA9958CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999AA95....",
+    "....PACCCAA9858CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHGGFEDCA758999ABA7....",
+    "....7CDDCAA9859CEFGHHIJJKLLMMMMMMMMLLLKKJJIIHHGFEDDB757999BBA8O...",
+    "...OADEDCAA9769DEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB857999BBBAQ...",
+    "...QCEEECA99769DEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB856999BCCA6...",
+    "...9DFFECA9977ADEFGHHIJKKLLMMMMMMMMLLLKKJJIIHHGFEDDB866999BCCB8N..",
+    "..PBFFFEC99968ADEFGHIIJKKLLMMMMMMMMLLLKKJJIIHHGFEEDB966899BCCC9P..",
+    "..QDGGFEB99958BDEFGHIIJKKLLMMMMMMMMLLLKKJJIIHHGFEEDBA75999BCDCBQ..",
+    "..9EHHGEB99858CDEFGHHIJJKKLLLMMMMLLLLKKKJJIIHGGFEDDBA75899BCDDB6..",
+    ".O9EHHGEB99858BDEFFGHIIJJKKKLLLLLLLKKKKJJIIHHGGFEDCB97589ABDDDD8O.",
+    ".O9DGGFEB99858BCDEFGHHIIJJJKKKKKKKKKKJJJIIHHGGFFEDCB97589ABDEEDAP.",
+    "..7BEFECA98858BCDEFGGHHIIJJJKKKKKKKJJJJIIHHHGFFEDCCA965899BDEFEBQ.",
+    "..Q9CDCB988758BCCEEFGGHHIIIJJJJJJJJJJIIIHHHGGFEEDCBA96589ACEFFFC8.",
+    "..O69BA9876657ABCDEEFGGHHIIIIJJJJJJIIIIHHHGGFFEDCCBA865899CEGGFD8O",
+    "...P6887655547ABCDDEFFGGHHHIIIIIIIIIIHHHGGGFFEDDCBAA865999CFGGFC7O",
+    "....O465544447ABBCDDEFFGGGHHHHHHHHHHHHHGGGFFEEDCBAA9756899CEFFDB7.",
+    "......OPPPOO469ABBCDDEFFFGGGHHHHHHHHGGGGFFFEEDCCBAA9756789BCDDC9Q.",
+    "............P69ABBCCDDEFFFFGGGGGGGGGGGFFFEEEDCCBAA997456789BBB97O.",
+    "............O69ABBBCCDDEEFFFFFFGGGFFFFFEEEDDCCBAAA9964555789997P..",
+    ".............59ABBBCCCDDDEEEFFFFFFFFFEEEDDCCBBAAAA9864Q4456776P...",
+    ".............Q8ABBCCCCCCDDDEEEEEEEEEEEDDDCCBBAAAAA986QNNPQQQPN....",
+    ".............P89BBCCCCBBCCCDDDDDDDDDDDDCCBBAAAAAAA986P............",
+    ".............O79BCCCCCCBBBCCCCCCDDDCCCCBBBAAAAAAA9985.............",
+    "..............79BCDDDDCCBBBBBBBCCBBBBBBAAAAAAAAA9987P.............",
+    "..............Q9BDDEEEDDCBBAAABBBBBAAAAA99AAAAA99986..............",
+    "..............P9BDEEFFEEDCBBA99AAAA9999999999999987O..............",
+    "..............P8BDEEFFFEEDCBAA98888898999999999887P...............",
+    "..............N7ACDEEFEEEDCBA98777777777888888887P................",
+    "...............59BCDEEEEDDBA98666655555666778776O.................",
+    "...............P7ABCDEEDDCA986655QQPQ345555665P...................",
+    "................48ABCCDDBA98665PON....OPQQPON.....................",
+    "................O579ABBA987654O...................................",
+    ".................O5689987765QO....................................",
+    "...................Q6776655QO.....................................",
+    "....................NPQ44QP.......................................",
+    "..................................................................",
+)
+BOT_REST = (
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "..................................................................",
+    "...............................NOOON..............................",
+    "..........................NPQ99AAAAA98QPN.........................",
+    "........................OQABCCDDDDDDCCBA9QO.......................",
+    "......................OQABCDEEEEEEEEEEDCCB9QO.....................",
+    ".....................PABDEEFFGGGGGGGFFFEDDCB9P....................",
+    "...................O8BCDEFGGHHHIIIHHGGGFFEDCBA7O..................",
+    "..................O9BCEEGGHIIJJJJJJIIHHGGFEDDBA8O.................",
+    ".................O9BCEFGHIIJKKKKKKKJJIIHHGFFEDBA8O................",
+    "................O9BCEFGHIJKKLLLMMMLLKJJIHHGFFEDBA7O...............",
+    "................8BCEFGHIJKLLMMMMMMMMLKKJIHHGFEECB96...............",
+    "...............PACDFGHIJKLMMMMMMMMMMMLKKJIHHGFEDCB9P..............",
+    "..............O9BDEFGHJKLMMMMMMMMMMMMMLKJJIHGGFEDBA7O.............",
+    "..............QACDFGHIJKMMMMMMMMMMMMMMLKKJIIHGFEDCA9Q.............",
+    ".............O9BDEFGHIKLMMMMMMMMMMMMMMMLKJJIHGFFEDBA7O............",
+    ".............QABDEGHIJKLMMMMMMMMMMMMMMMLKJJIHGGFEDBA8Q............",
+    ".............8BCEFGHIJKLMMMMMMMMMMMMMMMLKJJIHHGFEDCB96............",
+    "............O9BCEFGHIJKLMMMMMMMMMMMMMMMLKKJIIHGFEDCB97O...........",
+    "............P9BCEFGHIJKLMMMMMMMMMMMMMMLLKJJIIHGFEECBA8P...........",
+    "............7ABDEFGHIJKLLMMMMMMMMMMMMMLLKJJIHHGFEECBA85...........",
+    "............8ABDEFGHIJJKLMMMMMMMMMMMMLLKKJJIHHGFEDCBA86...........",
+    "............8ABDEFGHIIJKLLMMMMMMMMMMMLLKJJIIHHGFEDCBA86...........",
+    "...........N8ABDEFGHIIJKLLMMMMMMMMMMMLLKKJIIHHGFEDDBA86N..........",
+    "...........O8ABDEFGHHIJKKLLMMMMMMMMMLLKKJJIIHHGFEDCBA86O..........",
+    "...........O7ABDEFGHHIJKKLLMMMMMMMMMLLKKJJIIHHGFEDCBA86O..........",
+    "...........O7ABDEFGHHIJKKLLMMMMMMMMMLLKKJJIIHHGFEDDBA86O..........",
+    "...........P69CDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEDDBA85P..........",
+    "...........P69CDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEDDBA75P..........",
+    "..........NQ58CDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEEDBA75QN.........",
+    ".........OQ658BDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEEDBA745QO........",
+    "........Q77758BDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEEDCA74776Q.......",
+    ".......Q789857BDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEEDCA658887Q......",
+    "......P89AA967BDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEEDC96589987P.....",
+    "......69AABA67BDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFEEDC966999985.....",
+    ".....O8AAAB967BDEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFFEDC965899997O....",
+    ".....P9BBBBA67ADEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFFEDC9669A99A8P....",
+    ".....6ABBBCA77ADEFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGFFEDC9669AAAA95....",
+    "....N9BCCCCA77ADFFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGGFEDC9669BAABA8N...",
+    "....PACDDCCB77ADFFGHIIJKKLLMMMMMMMMMLLKKJJIIHHGGFEDC9669BABBB9P...",
+    "....QBDEDCCB77ADFFGHIJJKKLLMMMMMMMMMLLKKJJIIHHGGFEDC966ABBCCCAQ...",
+    "....9CEFECBB77ADFFGHIJJKKLLMMMMMMMMMLLKKKJIIHHGGFEDC967ABBCDDB8...",
+    "...OAEFFECBB77AEFGGHIJJKKLMMMMMMMMMMLLKKKJIIHHGGFEDC967ABBCDDC9O..",
+    "...QCFGGEBBB77BEGGHIIJJKKLLMMMMMMMMMLLKKJJIIHHGGFFEDA66ABBDEEDBQ..",
+    "...ADGHHEBBB77BEGHIJJJJJKKLLLMMMMLLLLKKKJJIIHHHHGFEDA76ABBDEEEC8..",
+    "..OBFHIHEBBB78CFGIJJKJJJJKKLLLLLLLLKKKKJJIIHHIIHHGFDA769BCEFFFEAO.",
+    "..PCFHHGEBAB68CFHIKKKKKJJJKKKKKKKKKKKJJJIIIIIIIIHGFEB75ABBDFFFEAP.",
+    "..QBFGGFCAAA58DGHJLLLLKJJJJJKKKKKKKJJJJIIIIIIJJJIHGEB759AACEFFDAQ.",
+    "..PAEFEDB99959EGIKLMMLLKJIJJJJJJJJJJJJIIIHIIJJJJIIGFC84999BDEDC9P.",
+    "..O9CDDCA8885AEGJKLMMLLKJIIIIJJJJJJIIIIHHIIJJKKJJIHFD94888ABCCB8O.",
+    "...59BBA87775BEHJKLMMLKKJIIIIIIIIIIIIIHHHIIJJKKKJIHFD947788AAA96..",
+    "...O689876666BEHIKLLLLKJJIIHHHIIIIHHHHHGHIIJJKKJJIHFD9566678887O..",
+    "....P56655545BEGIJKKKKJJIIHHHHHHHHHHHGGGHHIIJJJJIHGFC955555676P...",
+    ".....OQ5444Q4ADFHIIJJJIIIHHGGGGGGGGGGGGGGHHIIIIIHHFEB84Q4455QO....",
+    "............P9CEGHHIIIHHHGGGFFFFFFFFFFFFGGHHHHHHGGEDA8P...........",
+    "............O7ACEFGGGGGGGGFFEEEDDDDDDDDEFFGGGGGGFEDB97O...........",
+    ".............Q8ACDEFFFFFFFEDDCCCCCCCCCCDEEFFFFEEDDB98Q............",
+    ".............O58ABCDDDDDDCBCBBBBBBBBBBBBBCDDDDDCCA986O............",
+    "..............O579AABBBBBBA9999999999999AABBBBAA9986O.............",
+    "...............O5678999A998888777777778889999998876O..............",
+    "................N466778777777777777777776777887766N...............",
+    ".................NQ56666666656554445665666666766QN................",
+    "...................P5555555548ABCCCCB9455555666P..................",
+    "....................O555455568ABCCCCA964555566O...................",
+    "......................P44455689ABCCBA9755555P.....................",
+    "........................PQ456799AAA997554QP.......................",
+    "..........................NPQ455555554QPN.........................",
+    "................................NNN...............................",
+)
 
-def draw_hline(b, x, y, w, c):
-    if 0 <= y < 80:
-        for px in range(max(0, x), min(160, x + w)):
-            b[px, y] = c
+EYE_NORMAL = (
+    "......RRRRR...........RRRRR.....",
+    ".....RSTTTSRR.......RRSTTTSR....",
+    "....RSTUUUTSR.......RSTUUUTSR...",
+    "....RTUXXXUTSR.....RSTUXXXUTR...",
+    "....RTXXXXXUSR.....RSUXXXXXTR...",
+    "....RTXXXXXUSR.....RSUXXXXXTR...",
+    "....RTXXXXXUSR.....RSUXXXXXTR...",
+    "....RTWWWWWUSR.....RSUWWWWWTR...",
+    "....RTWWWWWUSR.....RSUWWWWWTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTUVVVUTSR.....RSTUVVVUTR...",
+    "....RSTUUUTSR.......RSTUUUTSR...",
+    ".....RSTTTSRR.......RRSTTTSR....",
+)
+EYE_HALF = (
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "......RRSRRR.........RRRSRR.....",
+    ".....RSTTTTRR.......RRTTTTSR....",
+    "....RSTUXUUTR.......RTUUXUTSR...",
+    "....RTUXXXXTSR.....RSTXXXXUTR...",
+    "....RTXXXXXUSR.....RSUXXXXXTR...",
+    "....RTXXXXXUSR.....RSUXXXXXTR...",
+    "....RTXXXXXUSR.....RSUXXXXXTR...",
+    "....RTWWWWWUSR.....RSUWWWWWTR...",
+    "....RTUWWWWUSR.....RSUWWWWUTR...",
+    "....RTUVVVUTSR.....RSTUVVVUTR...",
+    "....RSTUUUTSR.......RSTUUUTSR...",
+    ".....RSSTTSR.........RSTTSSR....",
+    "......RRRRR...........RRRRR.....",
+    "................................",
+    "................................",
+)
+EYE_BLINK = (
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "....SSSSSSSSS.......SSSSSSSSS...",
+    "...STVVVVVVVTS.....STVVVVVVVTS..",
+    "...STVVVVVVVTS.....STVVVVVVVTS..",
+    "....STTTTTTTSS.....SSTTTTTTTS...",
+    ".....SSSSSSSS.......SSSSSSSS....",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+)
+EYE_HAPPY = (
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    ".......SSS.............SSS......",
+    ".....SSTTTSS.........SSTTTSS....",
+    "....STTVVVVTS.......STVVVVTTS...",
+    "...SSVVVTTVVTS.....STVVTTVVVSS..",
+    "...STVTSSSTVVS.....SVVTSSSTVTS..",
+    "...STVTS..SVVTS...STVVS..STVTS..",
+    "..YYYY.....................YYYY.",
+    ".YYYYYY...................YYYYYY",
+    ".YYYYYYY.................YYYYYYY",
+    ".YYYYYYY.................YYYYYYY",
+    "..YYYYY...................YYYYY.",
+    "...YYY.....................YYY..",
+    "................................",
+)
+EYE_THINK = (
+    "......RRRRR.....................",
+    ".....RSTTTSRR...................",
+    "....RSTUUUTSR...................",
+    "....RTUXXXUTSR..................",
+    "....RTXXXXXUSR........RRRRR.....",
+    "....RTXXXXXUSR.......RSSTSRR....",
+    "....RTXXXXXUSR......RSTUUUTSR...",
+    "....RTWWWWWUSR......STUWWWUTR...",
+    "....RTWWWWWUSR.....RSUWWWWUTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSUVVVVVTR...",
+    "....RTVVVVVUSR.....RSTUVVVUTR...",
+    "....RTVVVVVUSR......RSTUUUTSR...",
+    "....RTUVVVUTSR.......RSTTTSR....",
+    "....RSTUUUTSR.........RRRRR.....",
+    ".....RSTTTSRR...................",
+)
+EYE_SLEEP = (
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "...STVTS..SVVS.....SVVS..STVTS..",
+    "...STVTSSSTVTS.....STVTSSSTVTS..",
+    "...SSVVTTTVVTS.....STVVTTTVVSS..",
+    "....STVVVVVTS.......STVVVVVTS...",
+    ".....SSTTTSS.........SSTTTSS....",
+    ".......SSSS...........SSSS......",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+)
+EYE_PARTY = (
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "..VVVVVVVVVVVVVVVVVVVVVVVVVVVVV.",
+    "VVVUUUUUUUUUUUUUUUUUUUUUUUUUUUVV",
+    "VUUUUUUrrrrrrrrrttttttttttUUUUUU",
+    "VUUUUUUrrrrrrrrrttttttttttUUUUUU",
+    "VUUUUUUrrrrrrrrrttttttttttUUUUUU",
+    "VUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU",
+    "VUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU",
+    "VVUUUUUUUUUUUUUUUUUUUUUUUUUUUUUV",
+    ".VVVUUUUUUUUUUUUUUUUUUUUUUUUUVVV",
+    "..VVVVVVVVVVVVVVVVVVVVVVVVVVVVV.",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+    "................................",
+)
 
-def draw_vline(b, x, y, h, c):
-    if 0 <= x < 160:
-        for py in range(max(0, y), min(80, y + h)):
-            b[x, py] = c
+PROP_COFFEE_0 = (
+    "................................",
+    "............zzz.................",
+    "............!!!.................",
+    "...........zz.zz................",
+    "..........!!...!!...............",
+    ".........zz.....zz..............",
+    ".........!!.....!!..............",
+    "......BGHJcdddddcDB84...........",
+    "......BGddeeeeeeedd84...........",
+    "......BGcddeeeeeddc84...........",
+    "......BGHJKLLKJIGDBIIBB.........",
+    "......BGHJKLLKJIGDIIIIIB........",
+    "....GIHGHJKLLKJIGDBBBBIIB.......",
+    "...JKLKJHDhhhhhhggBff.BIB.......",
+    "..IKLMLKIGBhhhhhggfff.BII.......",
+    ".EJLLMLKIGChhhhhggfff.BII.......",
+    ".EIKLLKJIFChhhhhggBffBBIB.......",
+    ".BGIJJJIGEALLKJIGDIIBIIIB.......",
+    "..DGHHGFEB6LLKJIGDIIIIBB........",
+    "...CDEDCA6KLLKJIGDBBBB..........",
+    "....6886HJKLLKJIGDB84...........",
+    "........HJKLLKJIGDB.............",
+    "................................",
+    "................................",
+)
+PROP_COFFEE_1 = (
+    "................................",
+    "...........zz.zz................",
+    "..........!!...!!...............",
+    ".........zz.....zz..............",
+    ".........!!.....!!..............",
+    "..........zz...zz...............",
+    "...........!!.!!................",
+    "......BGHJcdddddcDB84...........",
+    "......BGddeeeeeeedd84...........",
+    "......BGcddeeeeeddc84...........",
+    "......BGHJKLLKJIGDBIIBB.........",
+    "......BGHJKLLKJIGDIIIIIB........",
+    "....GIHGHJKLLKJIGDBBBBIIB.......",
+    "...JKLKJHDhhhhhhggBff.BIB.......",
+    "..IKLMLKIGBhhhhhggfff.BII.......",
+    ".EJLLMLKIGChhhhhggfff.BII.......",
+    ".EIKLLKJIFChhhhhggBffBBIB.......",
+    ".BGIJJJIGEALLKJIGDIIBIIIB.......",
+    "..DGHHGFEB6LLKJIGDIIIIBB........",
+    "...CDEDCA6KLLKJIGDBBBB..........",
+    "....6886HJKLLKJIGDB84...........",
+    "........HJKLLKJIGDB.............",
+    "................................",
+    "................................",
+)
+PROP_LAPTOP_0 = (
+    "..............o......o..........",
+    ".............o......o......o....",
+    "............o......o......o.....",
+    "...........o......o......o......",
+    "..............llllllllllllllllll",
+    ".............kkmmmmmmmmmmmmmmmmm",
+    ".............kmmonmnonmnonmnommk",
+    ".............kmmmmmmmmmmmmmmmmmk",
+    "............kkmmmmmmmmmmmmmmmmmk",
+    "............kmmmonomonomonommmkk",
+    "............kmmmmmmmmmmmmmmmmmk.",
+    "...........kkmmmmmmmmmmmmmmmmmk.",
+    "...........kmmonmnonmnonmnmmmk..",
+    ".........HIHFmmmmmmmmmmmmmmmmk..",
+    "..GJJIHFIJJIHEmmmmmmmmmmmmmmkk..",
+    "..IJJJIGCJJIHFBnomonomonommmk...",
+    ".GIJJIHFCIIHGEBkkkkkkkkkkkkkk...",
+    ".FHIHHGEBHHGEC9llllllllllllll...",
+    ".CFGGFEC9FEECA6jjjjjjjjjjjjjj...",
+    "..BDDCB96BBA96iiiiiiiiiiiiiii...",
+    "...89876..66....................",
+    "................................",
+    "................................",
+    "................................",
+)
+PROP_LAPTOP_1 = (
+    ".............o......o......o....",
+    "............o......o......o.....",
+    "...........o......o......o......",
+    "..........o......o......o.......",
+    "..............llllllllllllllllll",
+    ".............kkmonomonomonomommm",
+    ".............kmmmmmmmmmmmmmmmmmk",
+    ".............kmmmmmmmmmmmmmmmmmk",
+    "............kkmnmnonmnonmnonmmmk",
+    "............kmmmmmmmmmmmmmmmmmkk",
+    "............kmmmmmmmmmmmmmmmmmk.",
+    "...GIHF....kkmonomonomonomommmk.",
+    "..IJJJHFB..kmmmmmmmmmmmmmmmmmk..",
+    ".FIJJJHGD..kmmmmmmmmmmmmmmmmmk..",
+    ".GIIIIHFC.kkmnmnonmnonmnonmmkk..",
+    ".EGHHGFDA.kmmmmmmmmmmmmmmmmmk...",
+    ".9EFFEDB8JJIGDkkkkkkkkkkkkkkk...",
+    "..9BBB97JJJIHFBllllllllllllll...",
+    "...j666HJJJIGEBjjjjjjjjjjjjjj...",
+    "...iiiiGHIHHFDAiiiiiiiiiiiiii...",
+    ".......DFGFFDB8.................",
+    "........CDDCA8..................",
+    ".........8986...................",
+    "................................",
+)
+PROP_BULB = (
+    "................................",
+    ".....................r.r.r.r....",
+    "....................r.qqqq..r...",
+    "...................rqqrrrrqq.r..",
+    "..................rqqssrrrrqq.r.",
+    ".................r.qsssssrrrq...",
+    "..................qrssssssrrrqr.",
+    ".................rqrrssssssrrq..",
+    "..................qrrssssssrrqr.",
+    ".................rqrrrssssrrrq..",
+    "...................qrrrssrrrq.r.",
+    ".................r.qqrrrrrrqqr..",
+    "..................r.qqrrrrqqr...",
+    "...................r.kqqqqkr....",
+    "....................rkkkkkk.....",
+    "...GIIGD..............jjjj......",
+    "..IJJJIGD.............jjjj......",
+    ".FIJJJIGE9......................",
+    ".GIJIIHFD9......................",
+    ".EGHHHGEC8......................",
+    ".BEFFFDC96......................",
+    "..ACCCB96.......................",
+    "...68866........................",
+    "................................",
+)
 
-def set_px(b, x, y, c):
-    if 0 <= x < 160 and 0 <= y < 80:
-        b[x, y] = c
-
-def draw_border(b, x, y, w, h, c):
-    draw_hline(b, x, y, w, c)
-    draw_hline(b, x, y + h - 1, w, c)
-    draw_vline(b, x, y, h, c)
-    draw_vline(b, x + w - 1, y, h, c)
-
-def draw_8bit_box(b, x, y, w, h, fill_c, hi_c, sh_c, out_c=4):
-    fill_rect(b, x, y, w, h, fill_c)
-    draw_hline(b, x + 1, y + 1, w - 2, hi_c)
-    draw_vline(b, x + 1, y + 1, h - 2, hi_c)
-    draw_hline(b, x + 1, y + h - 2, w - 2, sh_c)
-    draw_vline(b, x + w - 2, y + 1, h - 2, sh_c)
-    draw_border(b, x, y, w, h, out_c)
-
-CHAR_MAP = {
-    ".": -1,
-    "0": 4,   # Solid black outline on FG!
-    "1": 1, "2": 2, "3": 3, "4": 4,
-    "5": 5, "6": 6, "7": 7, "8": 8,
-    "s": 9, "S": 10, "W": 11,         # Yeti/Snow Bear Fur: deep shadow, frost shadow, snow white
-    "h": 12, "m": 13, "M": 14,        # Brown/Terracotta
-    "c": 15, "C": 16, "I": 17,        # Scarf (c/C) & Ice Horns/Snout (I)
-    "d": 18, "g": 19, "G": 20,        # Monitor/Keyboard grays
-    "f": 21, "e": 22, "E": 23,        # Greens
-    "n": 24, "b": 25, "B": 26,        # Sky blues
-    "r": 27, "R": 28, "P": 29,        # Red / Blush Pink
-    "Y": 30,                          # Gold
-}
-
-def blit_sprite(b, x, y, rows):
+def load_tile(bmp, tile_idx, tile_w, rows):
+    x_off = tile_idx * tile_w
     for ry, row in enumerate(rows):
-        py = y + ry
-        if py < 0 or py >= 80:
-            continue
         for rx, ch in enumerate(row):
-            if ch == ".":
-                continue
-            px = x + rx
-            if 0 <= px < 160:
-                b[px, py] = CHAR_MAP.get(ch, 4)
+            if ch != ".":
+                bmp[x_off + rx, ry] = CHAR_TO_IDX[ch]
 
-# ─── 4. STATIC 8-BIT ROOM & DESK (LAYER 0 BG) ───────────────────────────────
-def build_static_room():
-    # 1. Crisp 8-Bit Brick Wall (y=0..45)
-    fill_rect(bg_bmp, 0, 0, 160, 46, 2)
-    for by in range(0, 46, 8):
-        draw_hline(bg_bmp, 0, by, 160, 1)
-        off = 8 if ((by // 8) % 2 == 1) else 0
-        for bx in range(off, 160, 16):
-            draw_vline(bg_bmp, bx, by, 8, 1)
-            draw_hline(bg_bmp, bx + 1, by + 1, 14, 3)
+# Populate Studio Backdrop & 3D Soft Contact Shadow
+for y in range(80):
+    c = 0 if y < 50 else (1 if y < 62 else (2 if y < 67 else 3))
+    for x in range(160):
+        bg_bmp[x, y] = c
 
-    # 2. Wood Wainscoting Wall Panels (y=46..58)
-    draw_hline(bg_bmp, 0, 46, 160, 4)
-    draw_hline(bg_bmp, 0, 47, 160, 8)
-    fill_rect(bg_bmp, 0, 48, 160, 11, 6)
-    for px in range(4, 156, 20):
-        draw_border(bg_bmp, px, 49, 16, 8, 5)
-        draw_hline(bg_bmp, px + 1, 56, 14, 7)
+for py in range(8):
+    ny = (py - 3.5) / 3.7
+    for px in range(56):
+        nx = (px - 27.5) / 27.5
+        r2 = nx * nx + ny * ny
+        if r2 < 0.35:
+            shadow_bmp[px, py] = 36
+        elif r2 < 0.68:
+            shadow_bmp[px, py] = 37
+        elif r2 <= 1.0:
+            shadow_bmp[px, py] = 38
 
-    # 3. Left Wall Framed Mountain Landscape Painting (x=3..48, y=4..41)
-    fill_rect(bg_bmp, 5, 6, 46, 38, 1)  # Cast drop shadow
-    draw_8bit_box(bg_bmp, 3, 4, 46, 38, 7, 8, 6, 4)
-    draw_border(bg_bmp, 5, 6, 42, 34, 30)  # Gold inner frame trim
+# Unpack 3D Raymarched Tiles into TileGrid Bitmaps once at boot
+for idx, t_rows in enumerate((BOT_STAND, BOT_STEP_L, BOT_STEP_R, BOT_REST)):
+    load_tile(bot_bmp, idx, 66, t_rows)
 
-    # 4. Right Wall Ornate Picture Frame + Gallery Lamp (x=105..152, y=4..41)
-    fill_rect(bg_bmp, 108, 6, 47, 38, 1)  # Drop shadow
-    draw_8bit_box(bg_bmp, 105, 4, 48, 38, 7, 8, 6, 4)
-    draw_border(bg_bmp, 107, 6, 44, 34, 30)
-    # Brass Gallery Lamp above frame
-    fill_rect(bg_bmp, 121, 1, 17, 3, 30)
-    draw_hline(bg_bmp, 122, 1, 15, 31)
+for idx, e_rows in enumerate((EYE_NORMAL, EYE_HALF, EYE_BLINK, EYE_HAPPY, EYE_THINK, EYE_SLEEP, EYE_PARTY)):
+    load_tile(eyes_bmp, idx, 32, e_rows)
 
-    # 5. Cozy Wooden Desk Surface (y=58..79) — No printer on the left!
-    draw_hline(bg_bmp, 0, 58, 160, 4)
-    draw_hline(bg_bmp, 0, 59, 160, 8)
-    fill_rect(bg_bmp, 0, 60, 160, 11, 7)
-    # Crisp 8-bit wood plank lines
-    for gy, gx in ((63, 20), (66, 85), (69, 40)):
-        draw_hline(bg_bmp, 0, gy, 160, 6)
-        draw_hline(bg_bmp, gx, gy, 18, 8)
-    # Desk front edge & drawers
-    draw_hline(bg_bmp, 0, 71, 160, 8)
-    draw_hline(bg_bmp, 0, 72, 160, 6)
-    draw_hline(bg_bmp, 0, 73, 160, 4)
-    fill_rect(bg_bmp, 0, 74, 160, 6, 5)
-    for dx in (8, 118):
-        draw_8bit_box(bg_bmp, dx, 74, 34, 6, 6, 7, 5, 4)
-        fill_rect(bg_bmp, dx + 14, 76, 6, 2, 30)
+for idx, p_rows in enumerate((PROP_COFFEE_0, PROP_COFFEE_1, PROP_LAPTOP_0, PROP_LAPTOP_1, PROP_BULB)):
+    load_tile(prop_bmp, idx + 1, 32, p_rows)
 
-    # 6. Far-Right Potted Cactus (x=137..155, y=47..65)
-    fill_rect(bg_bmp, 137, 63, 16, 3, 5)
-    CACTUS_SPRITE = [
-        "......0000......",
-        ".....0rPPr0.....",
-        "....00eEEe00....",
-        "...0fEeEEeEf0...",
-        ".000fEeEEeEf0...",
-        "0eEefEeEEeEf000.",
-        "0fEefEeEEeEfEeE0",
-        ".000fEeEEeEfEe0.",
-        "...0fEeEEeEf00..",
-        "...0fEeEEeEf0...",
-        "..000000000000..",
-        ".0mMMmmmmmmmmh0.",
-        ".0mMMmmmmmmmmh0.",
-        "..00mMMmmmmh00..",
-        "...0mMMmmmmh0...",
-        "...0mMMmmmmh0...",
-        "...0hhhhhhhh0...",
-        "....00000000....",
-    ]
-    blit_sprite(bg_bmp, 137, 47, CACTUS_SPRITE)
+# Free temporary string tables from RAM after unpacking into Bitmaps
+del BOT_STAND, BOT_STEP_L, BOT_STEP_R, BOT_REST
+del EYE_NORMAL, EYE_HALF, EYE_BLINK, EYE_HAPPY, EYE_THINK, EYE_SLEEP, EYE_PARTY
+del PROP_COFFEE_0, PROP_COFFEE_1, PROP_LAPTOP_0, PROP_LAPTOP_1, PROP_BULB
+gc.collect()
 
-build_static_room()
-
-# ─── 5. MOUNTAIN & FOREST LANDSCAPE PAINTING (x=6..45, y=7..38 -> 40x32) ────
-def draw_big_window(frame, hour, cpu_load):
-    wx, wy, ww, wh = 6, 7, 40, 32
-
-    is_day = 7 <= hour < 18
-    is_sunset = 18 <= hour < 21
-
-    # ── 1. Sky Background (Day Blue / Sunset / Starry Night / CPU Storm) ──
-    if cpu_load >= 85:
-        fill_rect(fg_bmp, wx, wy, ww, 14, 27)
-        fill_rect(fg_bmp, wx, wy + 14, ww, 18, 28)
-        if (frame // 2) % 2 == 0:
-            for i in range(5):
-                set_px(fg_bmp, wx + 22 - (i % 2), wy + 2 + i * 2, 31)
-    elif is_day:
-        # Bright blue daytime sky
-        fill_rect(fg_bmp, wx, wy, ww, 11, 25)
-        fill_rect(fg_bmp, wx, wy + 11, ww, 13, 26)
-        # Golden Sun in top-right sky
-        sx, sy = wx + 29, wy + 3
-        fill_rect(fg_bmp, sx + 1, sy, 5, 7, 30)
-        fill_rect(fg_bmp, sx, sy + 1, 7, 5, 30)
-        fill_rect(fg_bmp, sx + 2, sy + 2, 3, 3, 31)
-        # Slowly drifting 8-bit white cloud
-        cl_x = wx + 2 + ((frame // 8) % 22)
-        fill_rect(fg_bmp, cl_x, wy + 5, 9, 3, 31)
-        fill_rect(fg_bmp, cl_x + 2, wy + 4, 5, 2, 31)
-    elif is_sunset:
-        # Warm evening sunset sky
-        fill_rect(fg_bmp, wx, wy, ww, 8, 2)
-        fill_rect(fg_bmp, wx, wy + 8, ww, 8, 29)
-        fill_rect(fg_bmp, wx, wy + 16, ww, 8, 30)
-        # Setting sun behind mountain ridge
-        fill_rect(fg_bmp, wx + 26, wy + 11, 8, 7, 28)
-        fill_rect(fg_bmp, wx + 27, wy + 12, 6, 5, 30)
-    else:
-        # Dark starry night sky
-        fill_rect(fg_bmp, wx, wy, ww, 24, 24)
-        # Crescent Moon
-        fill_rect(fg_bmp, wx + 30, wy + 3, 5, 5, 30)
-        fill_rect(fg_bmp, wx + 31, wy + 4, 3, 3, 31)
-        fill_rect(fg_bmp, wx + 32, wy + 3, 3, 3, 24)
-        # Twinkling stars across the night sky
-        for idx, (stx, sty) in enumerate(((4, 3), (12, 5), (21, 3), (25, 8), (7, 10), (36, 11))):
-            col = 31 if ((frame // 6 + idx) % 2 == 0) else 17
-            set_px(fg_bmp, wx + stx, wy + sty, col)
-
-    # ── 2. Layered 8-Bit Snow-Capped Mountains ──
-    # Distant right peak (peak at wx+28, wy+11)
-    m2_light = 20 if is_day else (14 if is_sunset else 19)
-    m2_dark = 19 if is_day else (13 if is_sunset else 18)
-    for r in range(14):
-        w_half = r + 1
-        py = wy + 11 + r
-        x_left = max(wx, wx + 28 - w_half)
-        x_mid = wx + 28
-        x_right = min(wx + ww, wx + 28 + w_half)
-        snow_l = 31 if r < 4 else m2_light
-        snow_r = 10 if r < 4 else m2_dark
-        draw_hline(fg_bmp, x_left, py, x_mid - x_left, snow_l)
-        draw_hline(fg_bmp, x_mid, py, x_right - x_mid, snow_r)
-
-    # Main grand mountain peak on left-center (peak at wx+13, wy+8)
-    m1_light = 20 if is_day else (16 if is_sunset else 16)
-    m1_dark = 18 if is_day else (15 if is_sunset else 15)
-    for r in range(17):
-        w_half = r + 1
-        py = wy + 8 + r
-        x_left = max(wx, wx + 13 - w_half)
-        x_mid = wx + 13
-        x_right = min(wx + ww, wx + 13 + w_half)
-        # Jagged snow cap line (rows 0..5)
-        is_snow = (r < 5) or (r == 5 and (r % 2 == 0))
-        col_l = 31 if is_snow else m1_light
-        col_r = 10 if is_snow else m1_dark
-        draw_hline(fg_bmp, x_left, py, x_mid - x_left, col_l)
-        draw_hline(fg_bmp, x_mid, py, x_right - x_mid, col_r)
-
-    # ── 3. Evergreen Pine Forest along the Mountain Base (y=wy+22..wy+31) ──
-    fill_rect(fg_bmp, wx, wy + 25, ww, 7, 21)
-    tree_hi = 23 if is_day else (22 if is_sunset else 22)
-    tree_sh = 22 if is_day else (21 if is_sunset else 21)
-    # Draw row of 8-bit pixel pine trees across the foreground
-    for tx in range(wx + 2, wx + ww - 2, 5):
-        ty = wy + 20 + ((tx * 3) % 3)
-        # 3-tiered pine tree crown
-        for tier in range(3):
-            tw = 3 + tier * 2
-            t_y = ty + tier * 2
-            draw_hline(fg_bmp, tx - tier, t_y, tw // 2 + 1, tree_hi)
-            draw_hline(fg_bmp, tx, t_y, tw // 2 + 1, tree_sh)
-            draw_hline(fg_bmp, tx - tier, t_y + 1, tw, 21)
-
-# ─── 6. 8-BIT DYNAMIC WALL PAINTING (x=108..149, y=7..38 -> 42x32) ──────────
-def draw_8bit_painting(frame, poster_type):
-    cx, cy, cw, ch = 108, 7, 42, 32
-
-    if poster_type == "code_matrix":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 24)
-        for col in range(2, cw - 2, 5):
-            drop = (frame * 2 + col * 7) % (ch - 5)
-            draw_vline(fg_bmp, cx + col, cy + drop, 3, 21)
-            draw_vline(fg_bmp, cx + col, cy + drop + 2, 2, 22)
-            set_px(fg_bmp, cx + col, cy + drop + 4, 23)
-            set_px(fg_bmp, cx + col, cy + drop + 5, 31)
-        draw_8bit_box(fg_bmp, cx + 8, cy + 6, 26, 19, 24, 23, 21, 4)
-        fill_rect(fg_bmp, cx + 9, cy + 7, 24, 3, 22)
-        set_px(fg_bmp, cx + 11, cy + 8, 28)
-        set_px(fg_bmp, cx + 13, cy + 8, 30)
-        set_px(fg_bmp, cx + 15, cy + 8, 23)
-        draw_hline(fg_bmp, cx + 12, cy + 13, 10, 23)
-        draw_hline(fg_bmp, cx + 12, cy + 16, 14, 26)
-        if (frame // 4) % 2 == 0:
-            fill_rect(fg_bmp, cx + 27, cy + 15, 3, 3, 31)
-
-    elif poster_type == "bug_alert":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 27 if (frame // 4) % 2 == 0 else 24)
-        bx = cx + 8 + ((frame // 3) % 3) - 1
-        by = cy + 9
-        BUG_SPRITE = [
-            "....00..00....",
-            "...0Y0000Y0...",
-            "..00rrrrrr00..",
-            ".0rRPPPPPPrr0.",
-            "00rRPWrrWPRr00",
-            ".0rRRRRRRRRr0.",
-            "00rR0RRRR0Rr00",
-            ".0rRRRRRRRRr0.",
-            "00rrRRRRRRrr00",
-            "..00rrrrrr00..",
-            "....000000....",
-        ]
-        blit_sprite(fg_bmp, bx, by, BUG_SPRITE)
-        draw_8bit_box(fg_bmp, cx + 27, cy + 7, 9, 17, 30, 31, 14, 4)
-        fill_rect(fg_bmp, cx + 30, cy + 10, 3, 7, 4)
-        fill_rect(fg_bmp, cx + 30, cy + 19, 3, 3, 4)
-
-    elif poster_type == "coffee_need":
-        fill_rect(fg_bmp, cx, cy, cw, 22, 2)
-        fill_rect(fg_bmp, cx, cy + 22, cw, 10, 7)
-        draw_hline(fg_bmp, cx, cy + 22, cw, 8)
-        CUP_SPRITE = [
-            "....000000000000....",
-            "..00WWWWWWWWWWWW00..",
-            ".0WWmmmmmmmmmmmmWW0.",
-            ".0WWRRRRRRRRRrrrgg00",
-            ".0WWRRRRRRRRRrrrggG0",
-            ".0WWRRRRRRRRRrrrggG0",
-            "..0WRRRRRRRRRrrgg00.",
-            "..00RRRRRRRRRrrg0...",
-            "...00rrrrrrrrgg0....",
-            ".00WWWWWWWWWWWWWW00.",
-            "0WWWWWWWWWWWWWWWWWW0",
-            ".000000000000000000.",
-        ]
-        blit_sprite(fg_bmp, cx + 11, cy + 14, CUP_SPRITE)
-        s = (frame // 3) % 5
-        for sx in (cx + 16, cx + 21, cx + 25):
-            set_px(fg_bmp, sx + ((s + sx) % 2), cy + 11 - s, 31)
-            set_px(fg_bmp, sx, cy + 9 - s, 20)
-
-    elif poster_type == "brain_idea":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 24)
-        BULB_SPRITE = [
-            "....000000....",
-            "..00YYYYYY00..",
-            ".0YYWWYYYYYY0.",
-            "0YYWWYYYYYYYY0",
-            "0YYYYYYYYYYYY0",
-            "0YYYYYYYYYYYY0",
-            ".0YYYYYYYYYY0.",
-            "..00YYYYYY00..",
-            "...0GGGGGG0...",
-            "...0dddddd0...",
-            "...0GGGGGG0...",
-            "....00dd00....",
-        ]
-        blit_sprite(fg_bmp, cx + 14, cy + 7, BULB_SPRITE)
-        if (frame // 3) % 2 == 0:
-            for rx_p, ry_p in ((cx + 9, cy + 12), (cx + 31, cy + 12), (cx + 11, cy + 6), (cx + 29, cy + 6)):
-                fill_rect(fg_bmp, rx_p, ry_p, 2, 2, 30)
-
-    elif poster_type == "fire_panic":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 27)
-        for col in range(2, cw - 2, 3):
-            h_red = 10 + ((frame * 3 + col * 5) % 18)
-            fill_rect(fg_bmp, cx + col, cy + ch - h_red, 3, h_red, 28)
-            fill_rect(fg_bmp, cx + col, cy + ch - (h_red // 2), 3, h_red // 2, 30)
-            fill_rect(fg_bmp, cx + col, cy + ch - (h_red // 4), 2, h_red // 4, 31)
-
-    elif poster_type == "music_eq":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 1)
-        for i in range(8):
-            bh = 4 + ((frame * (i + 2) + i * 7) % 24)
-            bx = cx + 4 + i * 4
-            fill_rect(fg_bmp, bx, cy + ch - 2 - bh, 3, bh, 26)
-            fill_rect(fg_bmp, bx, cy + ch - 2 - (bh // 2), 3, bh // 2, 23)
-            draw_hline(fg_bmp, bx, cy + ch - 2 - bh, 3, 31)
-
-    elif poster_type == "chill_play":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 2)
-        draw_8bit_box(fg_bmp, cx + 5, cy + 4, 32, 24, 28, 29, 27, 4)
-        for py in range(-5, 6):
-            w_row = 6 - abs(py)
-            draw_hline(fg_bmp, cx + 18, cy + 16 + py, w_row, 31)
-
-    elif poster_type == "rocket_launch":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 24)
-        for st in range(6):
-            sy = cy + ((st * 6 + frame * 2) % (ch - 2))
-            set_px(fg_bmp, cx + 4 + st * 6, sy, 31)
-        rx, ry = cx + 16, cy + 4 + ((frame // 2) % 2)
-        ROCKET_SPRITE = [
-            "....00....",
-            "...0rR0...",
-            "..0rRRR0..",
-            "..0WGGG0..",
-            ".0WWGGGG0.",
-            ".0WWbBGG0.",
-            ".0WWbBGG0.",
-            ".0WWGGGG0.",
-            "0rWWGGGGrr",
-            "0RWWGGGGRR",
-            "0000000000",
-        ]
-        blit_sprite(fg_bmp, rx, ry, ROCKET_SPRITE)
-        fh = 4 + (frame % 4)
-        fill_rect(fg_bmp, rx + 2, ry + 11, 6, fh, 28)
-        fill_rect(fg_bmp, rx + 3, ry + 11, 4, fh - 1, 30)
-
-    elif poster_type == "heart_love":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 1)
-        beat = 1 if (frame // 5) % 2 == 0 else 0
-        HEART_SPRITE = [
-            "..0000..0000..",
-            ".0RRRR00RRRR0.",
-            "0RWWWRRRRRRRR0",
-            "0RWWWRRRRRrrR0",
-            "0RRRRRRRRrrrR0",
-            ".0RRRRRRrrrr0.",
-            "..0RRRRrrrr0..",
-            "...0RRRrrr0...",
-            "....0RRrr0....",
-            ".....0Rr0.....",
-            "......00......",
-        ]
-        blit_sprite(fg_bmp, cx + 14, cy + 10 - beat, HEART_SPRITE)
-
-    elif poster_type == "zzz_dream":
-        fill_rect(fg_bmp, cx, cy, cw, ch, 24)
-        fill_rect(fg_bmp, cx + 27, cy + 5, 7, 7, 30)
-        cl_x = cx + 5 + ((frame // 5) % 12)
-        CLOUD_SPRITE = [
-            "....00000.....",
-            "..00WWWWW000..",
-            ".0WWWWWWWWWW0.",
-            "0WWWWWWWWGGGg0",
-            "0GGGggggggggg0",
-            ".000000000000.",
-        ]
-        blit_sprite(fg_bmp, cl_x, cy + 17, CLOUD_SPRITE)
-
-    else:
-        # "zen_mountain"
-        fill_rect(fg_bmp, cx, cy, cw, 16, 25)
-        fill_rect(fg_bmp, cx, cy + 16, cw, 8, 29)
-        fill_rect(fg_bmp, cx + 23, cy + 6, 10, 10, 30)
-        for r in range(13):
-            mw = 4 + r * 2
-            mx = cx + 17 - r
-            my = cy + 11 + r
-            col_l = 31 if r < 5 else 16
-            col_r = 20 if r < 5 else 15
-            draw_hline(fg_bmp, mx, my, mw // 2 + 1, col_l)
-            draw_hline(fg_bmp, mx + mw // 2 + 1, my, mw // 2, col_r)
-        fill_rect(fg_bmp, cx, cy + 24, cw, 8, 24)
-
-# ─── 7. CUTE 8-BIT SNOW BEAR / YETI + SIDE MONITOR + KEYBOARD ───────────────
-# Strict non-overlapping clear zones so BOTH Wall Paintings (y<42) are NEVER touched!
-def clear_center_stage():
-    fill_rect(fg_bmp, 50, 18, 54, 24, 0)   # Upper Yeti head/chair zone between paintings
-    fill_rect(fg_bmp, 18, 42, 110, 26, 0)  # Lower desk zone (monitor + keyboard + paws + mug)
-
-def update_scarf_palette(mood, activity, cpu_load):
-    if mood in ("stressed", "panicking") or cpu_load >= 85:
-        fg_pal[15], fg_pal[16] = 0x991B1B, 0xEF4444
-    elif mood == "vibing" or activity == "music":
-        fg_pal[15], fg_pal[16] = 0x5B21B6, 0xA855F7
-    elif mood == "happy":
-        fg_pal[15], fg_pal[16] = 0x065F46, 0x10B981
-    elif mood in ("tired", "sleepy") or activity == "sleeping":
-        fg_pal[15], fg_pal[16] = 0x334155, 0x64748B
-    else:
-        fg_pal[15], fg_pal[16] = 0x1D4ED8, 0x3B82F6
-
-# Cute 8-bit Fluffy Snow Bear / Yeti Sprite (34x38 full seated body + ears + little ice horns + scarf!)
-YETI_BODY_SPRITE = [
-    "....0000....000........000....0000....",
-    "...0WWWW0..0III0..00..0III0..0WWWW0...",
-    "..0WSPPSW0.0Ibb00WWWW00bbI0.0WSPPSW0..",
-    "..0WSPPSW00WWWWWWWWWWWWWWWW00WSPPSW0..",
-    "...00WW00WWWWWWWWWWWWWWWWWWWW00WW00...",
-    "....0WWWWWWWWWWWWWWWWWWWWWWWWWWWW0....",
-    "...0WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW0...",
-    "..0WWSSSSSSSSWWWWWWWWWWWWSSSSSSSSWW0..",
-    "..0WWSSSSSSSSWWWWWWWWWWWWSSSSSSSSWW0..",
-    ".0WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW0.",
-    ".0WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW0.",
-    ".0WWWWWPPWWWWWWWW0000WWWWWWWWPPWWWWW0.",
-    ".0WWWWWPPWWWWWWW044440WWWWWWWPPWWWWW0.",
-    "..0WWWWWWWWWWWWWW0000WWWWWWWWWWWWWW0..",
-    "..0SSWWWWWWWWWWWWW44WWWWWWWWWWWWWSS0..",
-    "...00SSWWWWWWWWWWW00WWWWWWWWWWWSS00...",
-    "....00cCCCCCCCCCCCCCCCCCCCCCCCCc00....",
-    "...0cCCCCCCCCCCCCCCCCCCCCCCCCCCCc0....",
-    "..0s00ccccccccccccCCCccccccccccc00s0..",
-    ".0sSWW00000000000cCCCc0000000000WWSs0.",
-    ".0sSWWWWWWWWWWWWWcCCCcWWWWWWWWWWWWSs0.",
-    "0sSWWWWWWWWWWWWWWcCCCcWWWWWWWWWWWWWSs0",
-    "0sSWWWWWSSSSWWWWWW000WWWWWWSSSSWWWWWS0",
-    "0sSWWWWSSSSSSWWWWWWWWWWWWSSSSSSWWWWWS0",
-    "0sSWWWWSSSSSSSSWWWWWWWWSSSSSSSSWWWWWS0",
-    "0sSSWWWWSSSSSSSSWWWWWWWWSSSSSSSSWWWSs0",
-    ".0sSWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWS0.",
-    ".0sSSWWWWWWWWWWWWWWWWWWWWWWWWWWWWSSs0.",
-]
-
-def draw_yeti_and_desk_setup(frame, mood, activity, energy, cpu_load, event_name):
-    clear_center_stage()
-    update_scarf_palette(mood, activity, cpu_load)
-
-    bob = 2 if activity == "sleeping" else (
-        (1 if (frame // 3) % 2 == 0 else -1) if (activity == "music" or mood == "vibing")
-        else (1 if (frame // 12) % 2 == 1 else 0)
-    )
-
-    hx = 56
-    hy = 29 + bob
-
-    # 1. Cozy Gaming / Desk Chair Backrest behind the Snow Bear (grounded & full!)
-    draw_8bit_box(fg_bmp, hx + 4, 26, 30, 33, 14, 28, 13, 4)
-    draw_border(fg_bmp, hx + 7, 29, 24, 28, 12)
-
-    # 2. Full Fluffy Snow Bear / Yeti Seated Body (reaches all the way into the desk at y=58!)
-    blit_sprite(fg_bmp, hx, hy, YETI_BODY_SPRITE)
-
-    # 3. Expressive 8-Bit Eyes & Snout on the Snow Bear
-    gaze_x = -2 if activity in ("coding", "debugging", "terminal") else (1 if activity == "browsing" else 0)
-    is_blinking = (frame % 64) in (0, 1, 2)
-    lx = hx + 9 + gaze_x
-    rx = hx + 24 + gaze_x
-    ey = hy + 7
-
-    if activity == "sleeping" or is_blinking:
-        draw_hline(fg_bmp, lx, ey + 2, 5, 4)
-        draw_hline(fg_bmp, rx, ey + 2, 5, 4)
-    elif mood in ("happy", "vibing") or event_name == "cheer":
-        for ex in (lx, rx):
-            draw_hline(fg_bmp, ex + 1, ey, 3, 4)
-            set_px(fg_bmp, ex, ey + 1, 4)
-            set_px(fg_bmp, ex + 4, ey + 1, 4)
-            set_px(fg_bmp, ex, ey + 2, 4)
-            set_px(fg_bmp, ex + 4, ey + 2, 4)
-    elif mood in ("stressed", "panicking") or cpu_load >= 85:
-        for ex in (lx, rx):
-            draw_8bit_box(fg_bmp, ex, ey - 1, 5, 5, 31, 31, 20, 4)
-            fill_rect(fg_bmp, ex + 2, ey + 1, 2, 2, 4)
-        # Sweat drop
-        dy = hy + 4 + ((frame // 3) % 4)
-        blit_sprite(fg_bmp, hx + 33, dy, [".0.", "0I0", "0b0", ".0."])
-    elif mood in ("tired", "bored") or energy < 30:
-        for ex in (lx, rx):
-            fill_rect(fg_bmp, ex, ey + 1, 5, 3, 4)
-            draw_hline(fg_bmp, ex, ey, 5, 9)
-            set_px(fg_bmp, ex + 1, ey + 2, 31)
-    else:
-        # Big glossy 8-bit dark eyes with bright snow shine
-        for ex in (lx, rx):
-            fill_rect(fg_bmp, ex, ey - 1, 5, 5, 4)
-            fill_rect(fg_bmp, ex + 1, ey, 2, 2, 31)
-            set_px(fg_bmp, ex + 3, ey + 3, 17)
-        if activity in ("coding", "debugging", "terminal"):
-            # Focused eyebrows
-            draw_hline(fg_bmp, lx, ey - 2, 5, 4)
-            draw_hline(fg_bmp, rx, ey - 2, 5, 4)
-
-    # 8-Bit Headphones over Snow Bear's ears when listening to music!
-    if activity == "music" or mood == "vibing":
-        draw_hline(fg_bmp, hx + 4, hy - 1, 30, 28)
-        draw_8bit_box(fg_bmp, hx + 1, hy + 5, 5, 8, 28, 29, 27, 4)
-        draw_8bit_box(fg_bmp, hx + 32, hy + 5, 5, 8, 28, 29, 27, 4)
-
-    # 4. Side-Angled Desktop Monitor on the Left (x=22..52, y=42..64)
-    # Sits cleanly on the desk below the Left Mountain Painting!
-    fill_rect(fg_bmp, 24, 63, 26, 2, 5)  # Monitor desk shadow
-    # Monitor stand base & neck
-    draw_8bit_box(fg_bmp, 28, 60, 16, 4, 19, 20, 18, 4)
-    draw_8bit_box(fg_bmp, 33, 57, 6, 4, 18, 19, 4, 4)
-    # 3/4 Angled Monitor Casing (side depth on left, glowing screen on right facing Yeti!)
-    draw_8bit_box(fg_bmp, 22, 43, 8, 15, 18, 19, 4, 4)    # Left 3D depth side of monitor
-    draw_8bit_box(fg_bmp, 28, 42, 24, 16, 19, 20, 18, 4)  # Front angled bezel facing Yeti
-    # Inner glowing screen (x=31..49, y=44..55)
-    scr_bg = 27 if (mood in ("stressed", "panicking") or cpu_load >= 85) else 24
-    fill_rect(fg_bmp, 31, 44, 19, 12, scr_bg)
-    # Animated scrolling code lines on the monitor screen!
-    code_col = 28 if scr_bg == 27 else (30 if activity == "browsing" else 23)
-    scroll = (frame // 3) % 4 if activity in ("coding", "debugging", "terminal") else 0
-    for row_i in range(3):
-        ly_code = 46 + row_i * 3
-        lw = 6 + ((row_i * 5 + scroll * 3) % 11)
-        draw_hline(fg_bmp, 33, ly_code, lw, code_col if row_i % 2 == 0 else 26)
-    # Power LED on monitor bezel
-    set_px(fg_bmp, 49, 56, 23 if activity != "sleeping" else 30)
-
-    # 5. Mechanical Keyboard Lying Flat on Desk in Front of Yeti (x=56..94, y=60..66)
-    fill_rect(fg_bmp, 57, 65, 38, 2, 5)  # Keyboard shadow
-    draw_8bit_box(fg_bmp, 56, 60, 38, 6, 18, 20, 19, 4)
-    # Individual 8-bit keycaps row
-    for kx in range(59, 91, 3):
-        set_px(fg_bmp, kx, 62, 31)
-        set_px(fg_bmp, kx + 1, 62, 20)
-        set_px(fg_bmp, kx, 63, 20)
-
-    # 6. Fluffy Snow Bear Paws Tapping Directly on the Keyboard!
-    PAW_SPRITE = [
-        ".000000.",
-        "0WWWWWW0",
-        "0WSSSSW0",
-        "0s0ss0s0",
-        ".000000.",
-    ]
-    if event_name == "cheer":
-        w = (frame // 3) % 2
-        blit_sprite(fg_bmp, hx - 2, hy + 12 + w, PAW_SPRITE)
-        blit_sprite(fg_bmp, hx + 32, hy + 12 - w, PAW_SPRITE)
-    elif activity in ("coding", "debugging", "terminal"):
-        # Fast alternating Bongo-style paw slams right onto the keyboard keys!
-        l_down = (frame // 2) % 2 == 0
-        ly_paw = 59 if l_down else 56
-        ry_paw = 56 if l_down else 59
-        blit_sprite(fg_bmp, 60, ly_paw, PAW_SPRITE)
-        blit_sprite(fg_bmp, 79, ry_paw, PAW_SPRITE)
-        # Depress keycap & show 8-bit click spark!
-        if l_down:
-            fill_rect(fg_bmp, 62, 62, 4, 2, 23)
-            set_px(fg_bmp, 59, 58, 30)
-        else:
-            fill_rect(fg_bmp, 81, 62, 4, 2, 23)
-            set_px(fg_bmp, 87, 58, 30)
-    elif activity == "sleeping":
-        # Paws resting peacefully together on desk next to keyboard
-        blit_sprite(fg_bmp, 65, 58, PAW_SPRITE)
-        blit_sprite(fg_bmp, 75, 58, PAW_SPRITE)
-    else:
-        # Paws resting on edge of keyboard
-        blit_sprite(fg_bmp, 60, 58, PAW_SPRITE)
-        blit_sprite(fg_bmp, 79, 58, PAW_SPRITE)
-
-    # 7. Steaming Red Coffee Mug on Right Side of Desk (x=105..118, y=53..63)
-    mug_x = 106 if event_name != "sip_coffee" else 84
-    mug_y = 53 if event_name != "sip_coffee" else 44
-    if event_name != "sip_coffee":
-        fill_rect(fg_bmp, mug_x + 1, mug_y + 10, 11, 2, 5)
-    MUG_SPRITE = [
-        ".00000000...",
-        "0WWWWWWWW0..",
-        "0rRmmmmrh000",
-        "0rRmmmmrh0G0",
-        "0rRmmmmrh0G0",
-        "0rRmmmmrh000",
-        "0rRmmmmrh0..",
-        "0hhhhhhhh0..",
-        ".00000000...",
-    ]
-    blit_sprite(fg_bmp, mug_x, mug_y, MUG_SPRITE)
-    s_off = (frame // 4) % 4
-    set_px(fg_bmp, mug_x + 3, mug_y - 2 - s_off, 31)
-    set_px(fg_bmp, mug_x + 6, mug_y - 3 - ((s_off + 2) % 4), 20)
-
-    # 8. Small Energy Crystal Bar on Desk Corner (x=97..101, y=52..62)
-    draw_8bit_box(fg_bmp, 97, 51, 5, 12, 24, 20, 18, 4)
-    eh = int(10 * max(0, min(100, energy)) / 100)
-    ecol = 23 if energy > 50 else (30 if energy > 25 else 28)
-    if eh > 0:
-        fill_rect(fg_bmp, 98, 62 - eh, 3, eh, ecol)
-
-# ─── 8. NEOPIXEL BREATHING CONTROLLER ───────────────────────────────────────
-MOOD_RGB = {
-    "focused":   (0, 140, 255),
-    "happy":     (0, 255, 100),
-    "curious":   (80, 200, 255),
-    "vibing":    (180, 40, 255),
-    "bored":     (255, 160, 0),
-    "tired":     (60, 90, 160),
-    "sleepy":    (30, 50, 110),
-    "stressed":  (255, 50, 20),
-    "panicking": (255, 0, 40),
+# ─── 4. ULTRA-CRISP 6x8 BOLD SIDE COMIC CALLOUT RENDERER ────────────────────
+FONT_6X8_BOLD = {
+    "A": ('011110', '110011', '110011', '110011', '111111', '110011', '110011', '110011'),
+    "B": ('111110', '110011', '110011', '111110', '110011', '110011', '110011', '111110'),
+    "C": ('011111', '110000', '110000', '110000', '110000', '110000', '110000', '011111'),
+    "D": ('111110', '110011', '110011', '110011', '110011', '110011', '110011', '111110'),
+    "E": ('111111', '110000', '110000', '111110', '110000', '110000', '110000', '111111'),
+    "F": ('111111', '110000', '110000', '111110', '110000', '110000', '110000', '110000'),
+    "G": ('011111', '110000', '110000', '110111', '110011', '110011', '110011', '011111'),
+    "H": ('110011', '110011', '110011', '111111', '110011', '110011', '110011', '110011'),
+    "I": ('011110', '001100', '001100', '001100', '001100', '001100', '001100', '011110'),
+    "J": ('001111', '000110', '000110', '000110', '000110', '110110', '110110', '011100'),
+    "K": ('110011', '110110', '111100', '111000', '111100', '110110', '110011', '110011'),
+    "L": ('110000', '110000', '110000', '110000', '110000', '110000', '110000', '111111'),
+    "M": ('100001', '110011', '111111', '101101', '100001', '100001', '100001', '100001'),
+    "N": ('110001', '111001', '111101', '110111', '110011', '110001', '110001', '110001'),
+    "O": ('011110', '110011', '110011', '110011', '110011', '110011', '110011', '011110'),
+    "P": ('111110', '110011', '110011', '111110', '110000', '110000', '110000', '110000'),
+    "Q": ('011110', '110011', '110011', '110011', '110011', '110111', '110011', '011111'),
+    "R": ('111110', '110011', '110011', '111110', '111100', '110110', '110011', '110011'),
+    "S": ('011111', '110000', '110000', '011110', '000011', '000011', '110011', '011110'),
+    "T": ('111111', '001100', '001100', '001100', '001100', '001100', '001100', '001100'),
+    "U": ('110011', '110011', '110011', '110011', '110011', '110011', '110011', '011110'),
+    "V": ('110011', '110011', '110011', '110011', '110011', '011110', '001100', '001100'),
+    "W": ('100001', '100001', '100001', '100001', '101101', '111111', '110011', '100001'),
+    "X": ('110011', '110011', '011110', '001100', '001100', '011110', '110011', '110011'),
+    "Y": ('110011', '110011', '011110', '001100', '001100', '001100', '001100', '001100'),
+    "Z": ('111111', '000011', '000110', '001100', '011000', '110000', '110000', '111111'),
+    "0": ('011110', '110011', '110111', '110111', '111011', '111011', '110011', '011110'),
+    "1": ('001100', '011100', '111100', '001100', '001100', '001100', '001100', '011110'),
+    "2": ('011110', '110011', '000011', '000110', '001100', '011000', '110000', '111111'),
+    "3": ('111110', '000011', '000011', '011110', '000011', '000011', '110011', '011110'),
+    "4": ('110011', '110011', '110011', '111111', '000011', '000011', '000011', '000011'),
+    "5": ('111111', '110000', '110000', '111110', '000011', '000011', '110011', '011110'),
+    "6": ('011110', '110000', '110000', '111110', '110011', '110011', '110011', '011110'),
+    "7": ('111111', '110011', '000011', '000110', '001100', '001100', '001100', '001100'),
+    "8": ('011110', '110011', '110011', '011110', '110011', '110011', '110011', '011110'),
+    "9": ('011110', '110011', '110011', '011111', '000011', '000011', '110011', '011110'),
+    "!": ('001100', '001100', '001100', '001100', '001100', '000000', '001100', '001100'),
+    "?": ('011110', '110011', '000011', '000110', '001100', '000000', '001100', '001100'),
+    ".": ('000000', '000000', '000000', '000000', '000000', '000000', '011100', '011100'),
+    ",": ('000000', '000000', '000000', '000000', '000000', '001100', '001100', '011000'),
+    "-": ('000000', '000000', '000000', '111111', '000000', '000000', '000000', '000000'),
+    "+": ('000000', '001100', '001100', '111111', '001100', '001100', '000000', '000000'),
+    "/": ('000011', '000110', '001100', '001100', '011000', '011000', '110000', '000000'),
+    ":": ('000000', '001100', '001100', '000000', '000000', '001100', '001100', '000000'),
+    "~": ('000000', '000000', '011101', '110111', '100010', '000000', '000000', '000000'),
+    "%": ('110011', '110110', '001100', '001100', '011000', '011011', '110011', '000000'),
+    "#": ('010100', '111110', '010100', '010100', '111110', '010100', '000000', '000000'),
+    ">": ('110000', '011000', '001100', '000110', '001100', '011000', '110000', '000000'),
+    "<": ('000011', '000110', '001100', '011000', '001100', '000110', '000011', '000000'),
+    "_": ('000000', '000000', '000000', '000000', '000000', '000000', '000000', '111111'),
+    " ": ('000000', '000000', '000000', '000000', '000000', '000000', '000000', '000000'),
 }
 
-def update_neopixel(frame, mood, cpu_load):
-    if not led:
+def split_callout_lines(text):
+    """Greedy 2x10-char word wrap (mirrors host `layout_bubble_lines`)."""
+    words = text.strip().upper().split()
+    if not words:
+        return ("...",)
+    line1 = words[0][:10]
+    i = 1
+    while i < len(words) and len(line1) + 1 + len(words[i]) <= 10:
+        line1 += " " + words[i]
+        i += 1
+    if i >= len(words):
+        return (line1,)
+    return (line1, " ".join(words[i:])[:10])
+
+_last_callout_key = None
+
+def update_callout_bitmap(text, place_right, alert=False):
+    """Redraws callout_bmp ONLY when text or side changes — 0 CPU cost on normal frames!"""
+    global _last_callout_key
+    key = (text, place_right, alert)
+    if key == _last_callout_key:
         return
-    base = MOOD_RGB.get(mood, (0, 140, 255))
-    if cpu_load >= 85:
-        base = (255, 20, 0)
-    speed = 0.28 if (mood in ("stressed", "panicking") or cpu_load >= 85) else 0.10
-    pulse = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(frame * speed))
-    led[0] = (int(base[0] * pulse), int(base[1] * pulse), int(base[2] * pulse))
-    led.show()
+    _last_callout_key = key
 
-# ─── 9. STATE & SERIAL PROTOCOL ─────────────────────────────────────────────
-state = {
-    "mood": "focused",
-    "act": "coding",
-    "nrg": 95,
-    "cpu": 15,
-    "evt": "none",
-    "poster": "code_matrix",
-    "hour": 14,  # Default daytime so window is bright & sunny right away!
-}
+    callout_bmp.fill(0)
+    lines = split_callout_lines(text)
+    max_chars = max(len(l) for l in lines)
+    text_w = max_chars * 7 - 1
+    bw = min(80, max(36, text_w + 10))
+    bh = 16 if len(lines) == 1 else 26
 
-evt_timer = 0
-serial_buf = ""
+    bx = 6 if place_right else (88 - 6 - bw)
+    by = 1
 
-def apply_packet(line):
-    global evt_timer
-    for part in line.split("|"):
-        if ":" not in part:
-            continue
-        k, v = part.split(":", 1)
-        k = k.strip().upper()
-        v = v.strip()
-        if k == "MOOD" and v:
-            state["mood"] = v.lower()
-        elif k == "ACT" and v:
-            state["act"] = v.lower()
-        elif k == "NRG":
-            try:
-                state["nrg"] = max(0, min(100, int(v)))
-            except ValueError:
-                pass
-        elif k == "CPU":
-            try:
-                state["cpu"] = max(0, min(100, int(v)))
-            except ValueError:
-                pass
-        elif k == "EVT" and v:
-            state["evt"] = v.lower()
-            if state["evt"] != "none":
-                evt_timer = 60
-        elif k == "POSTER" and v:
-            state["poster"] = v.lower()
-        elif k == "HOUR":
-            try:
-                state["hour"] = int(v) % 24
-            except ValueError:
-                pass
+    border_c = 43 if alert else 61
+    fill_c = 60
+    shadow_c = 58
+    text_c = 42 if alert else 32
 
+    # Crisp high-contrast rounded comic box inside callout_bmp
+    for py in range(by, by + bh):
+        for px in range(bx, bx + bw):
+            is_top = (py == by)
+            is_bot = (py == by + bh - 1)
+            is_l = (px == bx)
+            is_r = (px == bx + bw - 1)
+            if (is_top or is_bot) and (is_l or is_r):
+                continue
+            if is_top or is_bot or is_l or is_r:
+                callout_bmp[px, py] = border_c
+            elif py == by + bh - 2:
+                callout_bmp[px, py] = shadow_c
+            else:
+                callout_bmp[px, py] = fill_c
+
+    # Anti-aliased inner corner pixels
+    callout_bmp[bx + 1, by + 1] = border_c
+    callout_bmp[bx + bw - 2, by + 1] = border_c
+    callout_bmp[bx + 1, by + bh - 2] = border_c
+    callout_bmp[bx + bw - 2, by + bh - 2] = border_c
+
+    # Horizontal triangular callout pointer (<-- or -->)
+    ay = by + bh // 2
+    if place_right:
+        for dx in range(1, 6):
+            hh = max(0, (5 - dx) // 2)
+            for py in range(ay - hh, ay + hh + 1):
+                callout_bmp[bx - dx + 1, py] = fill_c
+            callout_bmp[bx - dx + 1, ay - hh - 1] = border_c
+            callout_bmp[bx - dx + 1, ay + hh + 1] = border_c
+        callout_bmp[bx - 5, ay] = border_c
+    else:
+        rx_edge = bx + bw - 1
+        for dx in range(1, 6):
+            hh = max(0, (5 - dx) // 2)
+            for py in range(ay - hh, ay + hh + 1):
+                callout_bmp[rx_edge + dx - 1, py] = fill_c
+            callout_bmp[rx_edge + dx - 1, ay - hh - 1] = border_c
+            callout_bmp[rx_edge + dx - 1, ay + hh + 1] = border_c
+        callout_bmp[rx_edge + 5, ay] = border_c
+
+    # Draw ultra-crisp 6x8 BOLD pixel text (2px stems!) on pure white interior
+    for idx, line_str in enumerate(lines):
+        lw = len(line_str) * 7 - 1
+        cx = bx + (bw - lw) // 2
+        ty = by + 4 + idx * 10
+        for ch in line_str:
+            glyph = FONT_6X8_BOLD.get(ch, FONT_6X8_BOLD[" "])
+            for ry in range(8):
+                r_str = glyph[ry]
+                for rx in range(6):
+                    if r_str[rx] == "1":
+                        callout_bmp[cx + rx, ty + ry] = text_c
+            cx += 7
+
+# ─── 5. USB SERIAL PROTOCOL & NeoPixel LED SYNC ─────────────────────────────
 try:
     import usb_cdc
-    cdc_data = usb_cdc.data
+    serial_data = usb_cdc.data
 except Exception:
-    cdc_data = None
+    serial_data = None
 
-# ─── 10. MAIN 8-BIT RENDER LOOP ─────────────────────────────────────────────
+def set_neopixel_state(state, frame):
+    """Updates GP16 NeoPixel with dirty-check to avoid redundant interrupt-blocking writes."""
+    global _last_led_rgb
+    if led_pin is None:
+        return
+    s_val = SIN_64[(frame << 1) & 63]
+    pulse = 0.65 + 0.35 * s_val
+    if state == "OVERLOAD":
+        r, g, b = (90, 5, 5) if (frame & 1 == 0) else (20, 0, 0)
+    elif state == "CODING":
+        r, g, b = 0, int(38 * pulse), int(75 * pulse)
+    elif state == "COFFEE":
+        r, g, b = int(55 * pulse), int(32 * pulse), int(5 * pulse)
+    elif state == "THINKING":
+        r, g, b = int(42 * pulse), int(10 * pulse), int(75 * pulse)
+    elif state == "CHILL":
+        r, g, b = int(5 * pulse), int(55 * pulse), int(25 * pulse)
+    elif state == "PARTY":
+        r = int(45 + 40 * SIN_64[(frame * 3) & 63])
+        g = int(45 + 40 * SIN_64[(frame * 3 + 21) & 63])
+        b = int(45 + 40 * SIN_64[(frame * 3 + 42) & 63])
+    else:
+        r, g, b = int(4 * pulse), int(6 * pulse), int(22 * pulse)
+
+    g_c = max(0, min(255, g))
+    r_c = max(0, min(255, r))
+    b_c = max(0, min(255, b))
+    rgb_tuple = (g_c, r_c, b_c)
+    if rgb_tuple == _last_led_rgb:
+        return
+    _last_led_rgb = rgb_tuple
+    led_buf[0] = g_c
+    led_buf[1] = r_c
+    led_buf[2] = b_c
+    try:
+        neopixel_write(led_pin, led_buf)
+    except Exception:
+        pass
+
+# ─── 6. HIGH-FPS 3D HARDWARE-COMPOSITED ANIMATION LOOP ──────────────────────
+# Fallback thoughts used ONLY when running standalone without host_companion.py
+DEFAULT_PHRASES = {
+    "CODING":   ("DEEP WORK", "LGTM!", "SHIP IT!", "TYPING...", "0 BUGS?", "CLEAN CODE"),
+    "COFFEE":   ("NEED COFFEE", "SIPPING~", "CAFFEINE+", "BRB COFFEE", "HOT BREW!"),
+    "THINKING": ("HMM...", "WAIT WTF?", "BIG BRAIN", "OTF MODE", "LET ME SEE", "WHY THO?"),
+    "CHILL":    ("VIBING~", "CHILL MODE", "COZY AF", "LOFI BEAT", "RESTING"),
+    "SLEEP":    ("ZZZ...", "SLEEP MODE", "DREAMING~", "AFK ZZZ"),
+    "OVERLOAD": ("WTF?!", "CPU 99%!", "SEGFAULT!", "PANIC!!", "HOT CPU!"),
+    "PARTY":    ("HELL YEAH!", "DEPLOYED!", "GG EZ!", "10X VIBE!"),
+}
+
+STATE_TO_THEME = {
+    "CODING":   "CYBER",
+    "COFFEE":   "TEAL",
+    "THINKING": "VIOLET",
+    "CHILL":    "EMERALD",
+    "SLEEP":    "INDIGO",
+    "OVERLOAD": "CRIMSON",
+    "PARTY":    "GOLD",
+}
+
+WALK_SEQ = (0, 1, 0, 2)
+TARGET_FRAME_DT = 0.028  # ~36 FPS smooth hardware TileGrid animation
+
+def map_incoming_state(act, mood, evt, poster, cpu):
+    if cpu >= 85 or mood == "panicking" or poster == "fire_panic":
+        return "OVERLOAD"
+    if act == "sleeping" or mood == "sleepy" or poster == "zzz_dream":
+        return "SLEEP"
+    if evt == "cheer" or poster == "rocket_launch":
+        return "PARTY"
+    if evt == "sip_coffee" or poster == "coffee_need" or mood == "tired":
+        return "COFFEE"
+    if poster in ("brain_idea", "bug_alert") or mood in ("curious", "stressed"):
+        return "THINKING"
+    if act in ("music", "browsing") and poster in ("music_eq", "chill_play", "heart_love", "zen_mountain"):
+        return "CHILL"
+    if act in ("coding", "terminal") or poster == "code_matrix":
+        return "CODING"
+    return "COFFEE"
+
+apply_slime_theme("CYBER")
+
+current_state = "COFFEE"
+llm_thoughts = ()
+llm_thoughts_until = 0.0
+phrase_idx = 0
+last_phrase_cycle = time.monotonic()
+
+slime_x = 36.0
+slime_vx = 1.2
+eye_look_x = 2.5
+eye_look_y = 0.0
+sip_lift = 0.0
 frame = 0
-print("8-Bit Snow Bear Yeti Companion Ready!")
+serial_buf = ""
 
 while True:
-    # 1. Read from CircuitPython Console serial port (e.g. /dev/cu.usbmodem11201)
-    while supervisor.runtime.serial_bytes_available:
-        n = supervisor.runtime.serial_bytes_available
-        serial_buf += sys.stdin.read(n)
+    frame_start = time.monotonic()
 
-    # 2. Also read from secondary USB CDC Data port if used (e.g. /dev/cu.usbmodem11203)
-    if cdc_data and cdc_data.in_waiting:
-        raw = cdc_data.read(cdc_data.in_waiting)
-        if raw:
-            try:
+    # 1. Read USB Serial (Console + Data)
+    while supervisor.runtime.serial_bytes_available:
+        ch = sys.stdin.read(1)
+        if ch:
+            serial_buf += ch
+    if serial_data is not None and serial_data.in_waiting > 0:
+        try:
+            raw = serial_data.read(serial_data.in_waiting)
+            if raw:
                 serial_buf += raw.decode("utf-8", "ignore")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     if "\n" in serial_buf:
         lines = serial_buf.split("\n")
-        for ln in lines[:-1]:
-            if ln.strip():
-                apply_packet(ln.strip())
         serial_buf = lines[-1]
+        for line in lines[:-1]:
+            line = line.strip()
+            if not line:
+                continue
+            kv = {}
+            for part in line.split("|"):
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    kv[k.strip().upper()] = v.strip()
+            if kv:
+                act = kv.get("ACT", "coding").lower()
+                mood = kv.get("MOOD", "focused").lower()
+                evt = kv.get("EVT", "none").lower()
+                poster = kv.get("POSTER", "code_matrix").lower()
+                state_override = kv.get("STATE", "").upper()
+                theme_override = kv.get("THEME", "").upper()
+                msg_in = kv.get("MSG", "").strip()
+                try:
+                    cpu_val = int(kv.get("CPU", "15"))
+                except ValueError:
+                    cpu_val = 15
 
-    if evt_timer > 0:
-        evt_timer -= 1
-        if evt_timer == 0:
-            state["evt"] = "none"
+                if state_override in DEFAULT_PHRASES:
+                    current_state = state_override
+                else:
+                    current_state = map_incoming_state(act, mood, evt, poster, cpu_val)
 
-    draw_yeti_and_desk_setup(frame, state["mood"], state["act"], state["nrg"], state["cpu"], state["evt"])
-    draw_big_window(frame, state["hour"], state["cpu"])
-    draw_8bit_painting(frame, state["poster"])
-    display.refresh()
+                theme_key = theme_override if theme_override in STUDIO_TINTS else STATE_TO_THEME.get(current_state, "CYBER")
+                apply_slime_theme(theme_key)
 
-    update_neopixel(frame, state["mood"], state["cpu"])
+                if "MSG" in kv:
+                    # Live LLM thoughts, '~' separated. Empty MSG -> built-in phrase pool.
+                    parsed = tuple(t.strip()[:21].upper() for t in msg_in.split("~") if t.strip())
+                    if parsed != llm_thoughts:
+                        llm_thoughts = parsed
+                        phrase_idx = 0
+                        last_phrase_cycle = frame_start
+                    llm_thoughts_until = frame_start + 180.0
 
-    frame = (frame + 1) % 100000
-    time.sleep(0.05)
+    # 2. Smoothly update position & velocity
+    sipping = (current_state == "COFFEE") and ((frame % 44) >= 28)
+    if current_state == "COFFEE":
+        if not sipping:
+            slime_x += slime_vx
+            if slime_x > 124.0:
+                slime_x = 124.0
+                slime_vx = -1.2
+            elif slime_x < 36.0:
+                slime_x = 36.0
+                slime_vx = 1.2
+    elif current_state == "THINKING":
+        slime_x += slime_vx * 0.55
+        if slime_x > 120.0:
+            slime_x = 120.0
+            slime_vx = -1.1
+        elif slime_x < 36.0:
+            slime_x = 36.0
+            slime_vx = 1.1
+    elif current_state == "PARTY":
+        slime_x += slime_vx * 1.3
+        if slime_x > 124.0:
+            slime_x = 124.0
+            slime_vx = -1.3
+        elif slime_x < 36.0:
+            slime_x = 36.0
+            slime_vx = 1.3
+    elif current_state == "CODING":
+        target = 35.0
+        if abs(slime_x - target) > 1.2:
+            slime_x += (target - slime_x) * 0.18
+    else:
+        target = 38.0
+        if abs(slime_x - target) > 1.2:
+            slime_x += (target - slime_x) * 0.15
+
+    # 3. Smoothly interpolate 3D eye gaze & O(1) table-lookup breathing bob
+    target_look_x = 0.0 if (sipping or current_state in ("SLEEP", "CHILL")) else (3.5 if (current_state == "CODING" or slime_vx >= 0) else -3.5)
+    target_look_y = 1.0 if current_state == "CODING" else (-1.0 if current_state == "THINKING" else 0.0)
+    eye_look_x += (target_look_x - eye_look_x) * 0.35
+    eye_look_y += (target_look_y - eye_look_y) * 0.35
+
+    bob = int(SIN_64[(frame * 3) & 63] * 1.5)
+    ix = int(slime_x)
+    bx = ix - 33
+    if current_state == "OVERLOAD":
+        bx += (1 if (frame & 1 == 0) else -1)
+    by = 2 + bob
+
+    # 4. Update Giant 66x75 3D Body TileGrid & Shadow TileGrid
+    shadow_grid.x = ix - 28
+    shadow_grid.y = 71
+
+    if current_state in ("SLEEP", "CHILL"):
+        bot_grid[0] = 3  # REST / SITTING 3D POSE
+        bot_grid.x = bx
+        bot_grid.y = 4 + (1 if (frame & 15) < 8 else 0)
+    elif current_state == "CODING" or sipping or current_state == "OVERLOAD":
+        bot_grid[0] = 0  # STAND 3D POSE
+        bot_grid.x = bx
+        bot_grid.y = by
+    else:
+        bot_grid[0] = WALK_SEQ[(frame // 3) & 3]
+        bot_grid.x = bx
+        bot_grid.y = by
+
+    # 5. Update 32x20 3D Anti-Aliased Eyes TileGrid (with 2-stage smooth eyelid blink!)
+    blink_phase = frame % 52
+    if current_state == "SLEEP":
+        eyes_grid[0] = 5
+    elif current_state == "PARTY":
+        eyes_grid[0] = 6
+    elif sipping or (current_state == "CHILL" and (frame % 28) < 12):
+        eyes_grid[0] = 3  # Happy ^ ^ + Rosy Blush
+    elif blink_phase in (48, 51):
+        eyes_grid[0] = 1  # Half-Blink intermediate eyelid frame!
+    elif blink_phase in (49, 50):
+        eyes_grid[0] = 2  # Full Closed Blink!
+    elif current_state == "THINKING":
+        eyes_grid[0] = 4  # Inquisitive 3D Squint
+    else:
+        eyes_grid[0] = 0  # Iconic Tall 3D Vertical Capsule Eyes
+
+    eyes_grid.x = bot_grid.x + 17 + int(eye_look_x)
+    eyes_grid.y = bot_grid.y + (21 if bot_grid[0] == 3 else 16) + int(eye_look_y)
+
+    # 6. Update 32x24 3D Interactive Prop TileGrid
+    target_sip = 7.0 if sipping else 0.0
+    sip_lift += (target_sip - sip_lift) * 0.35
+
+    if current_state == "COFFEE":
+        prop_grid[0] = 1 + ((frame >> 2) & 1)
+        if sipping:
+            prop_grid.x = ix - 10
+        else:
+            prop_grid.x = (bot_grid.x + 42) if slime_vx >= 0 else (bot_grid.x - 10)
+        prop_grid.y = bot_grid.y + 28 - int(sip_lift)
+    elif current_state == "CODING":
+        prop_grid[0] = 3 + ((frame >> 1) & 1)
+        prop_grid.x = bot_grid.x + 44
+        prop_grid.y = 46
+    elif current_state in ("THINKING", "OVERLOAD"):
+        prop_grid[0] = 5
+        prop_grid.x = bot_grid.x + 31
+        prop_grid.y = bot_grid.y + 17 + (1 if (frame % 6) < 3 else 0)
+    elif current_state == "CHILL":
+        prop_grid[0] = 1 + ((frame // 5) & 1)
+        prop_grid.x = bot_grid.x + 44
+        prop_grid.y = 48
+    else:
+        prop_grid[0] = 0  # Hidden in SLEEP / PARTY
+
+    # 7. Update Rock-Steady Ultra-Crisp 6x8 Bold Side Comic Callout Bubble
+    if frame_start - last_phrase_cycle > 4.2:
+        last_phrase_cycle = frame_start
+        phrase_idx += 1
+
+    if llm_thoughts and frame_start < llm_thoughts_until:
+        active_speech = llm_thoughts[phrase_idx % len(llm_thoughts)]
+    else:
+        phrases = DEFAULT_PHRASES.get(current_state, DEFAULT_PHRASES["COFFEE"])
+        active_speech = phrases[phrase_idx % len(phrases)]
+
+    place_right = (slime_x <= 80.0)
+    update_callout_bitmap(active_speech, place_right, alert=(current_state == "OVERLOAD"))
+
+    if place_right:
+        callout_grid.x = min(71, ix + 30)
+    else:
+        callout_grid.x = max(1, ix - 30 - 88)
+    callout_grid.y = 10  # Locked steady — zero vertical blur!
+
+    set_neopixel_state(current_state, frame)
+    display.refresh(minimum_frames_per_second=0)
+    frame += 1
+
+    elapsed = time.monotonic() - frame_start
+    if elapsed < TARGET_FRAME_DT:
+        time.sleep(TARGET_FRAME_DT - elapsed)
