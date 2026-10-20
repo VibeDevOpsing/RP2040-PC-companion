@@ -1,34 +1,35 @@
-# 🐾 RP2040-Zero 8-Bit Desk-Buddy Companion
+# 🐾 RP2040-Zero 3D Grok Bot Desk Companion
 
-An expressive, **100% visual 8-bit pixel-art desktop companion** powered by a **Waveshare RP2040-Zero**, a **0.96" ST7735R IPS display (160×80)**, and a **local Vision/Text LLM** (`google/gemma-4-e2b`, `SmolVLM2-2.2B`, or `Qwen2.5-VL-3B`) running via **LM Studio** on macOS.
+An expressive, **3D volumetric raymarched cyber-bot companion** powered by a **Waveshare RP2040-Zero**, a **0.96" ST7735R IPS display (160×80)**, and a **local LLM** (`google/gemma-4-e2b`, `SmolVLM2`, or `Qwen2.5`) running via **LM Studio** on macOS, Linux, or Windows.
 
-Sitting in a cozy pixel-art room behind a wooden desk with a side-angled monitor, mechanical keyboard, steaming mug of coffee, and a potted cactus, a fluffy **8-Bit Snow Bear / Yeti** reacts in real time to your workflow, system load, Pomodoro stamina, time of day, and screen context — expressing its "thoughts" through a **Dynamic Wall Painting** rather than text clutter.
+Featuring smooth **Signed Distance Field (SDF) 3D raymarched porcelain-pearl rendering**, sub-pixel anti-aliasing, hardware-composited `displayio.TileGrid` layers (~40 FPS), animated interactive props (3D Coffee Mug, Aluminum Laptop, Idea Lightbulb), and a **high-contrast 6×8 bold comic callout bubble**, Grok Bot acts as an intelligent desk-buddy that reacts live to your active development workflows, CPU spikes, Pomodoro energy, and idle states with real-time AI thoughts and inner monologue.
 
 ---
 
-## ✨ Features & Visual Architecture
+## ✨ Features & Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Mac ["🖥️ macOS Host Daemon (host_companion.py)"]
-        Sensors["Fast Sensors (1.5s)<br/>• Frontmost App & Window<br/>• macOS Idle Time<br/>• CPU Load & Pomodoro Energy<br/>• Local Time of Day"]
-        Screen["Periodic Vision (25s)<br/>• Silent Downscaled Screenshot<br/>• Active Context Summary"]
-        Reflex["⚡ Tier 1: Reflex Engine<br/>Instant (<5ms) Activity & Mood"]
-        LLM["🧠 Tier 2: LM Studio Brain<br/>(google/gemma-4-e2b)<br/>Structured JSON Poster & Mood"]
+    subgraph Host ["🖥️ Cross-Platform Host Companion (host_companion.py)"]
+        Sensors["Fast Native Sensors (1.5s)<br/>• Frontmost App & Window Title<br/>• CoreGraphics/xprintidle Idle Detection<br/>• CPU Load & Pomodoro Stamina<br/>• Active Terminal & Dev Process Context"]
+        Timeline["Activity Timeline<br/>• Window switches & dwell tracking<br/>• Recent thoughts history (anti-repetition)"]
+        Reflex["⚡ Tier 1: Fast Reflex Engine<br/>Instant (<5ms) state & safety classification"]
+        LLM["🧠 Tier 2: Asynchronous Thought Engine<br/>(google/gemma-4-e2b in LM Studio)<br/>Contextual 1-3 word multi-thought stream"]
     end
 
-    subgraph RP2040 ["🐾 Waveshare RP2040-Zero (code.py)"]
-        LeftArt["🏔️ Left Painting<br/>Mountain & Pine Forest<br/>(Day / Sunset / Starry Night)"]
-        Yeti["🐻‍❄️ 8-Bit Snow Bear / Yeti<br/>• Bongo-style Paw Typing<br/>• Side Monitor + Keyboard<br/>• Expressive Eyes & Scarf"]
-        RightArt["🎨 Right Dynamic Painting<br/>11 Animated Pixel Scenes<br/>(Visualizes LLM Thoughts)"]
-        LED["🌈 Onboard NeoPixel (GP16)<br/>Smooth Mood Breathing"]
+    subgraph RP2040 ["👾 RP2040-Zero + ST7735R (code.py)"]
+        Backdrop["🌌 3D Studio Velvet Backdrop<br/>Matte horizon & concentric contact shadow"]
+        Bot["🤖 66x75 3D Raymarched Grok Bot<br/>• 20 porcelain shading steps<br/>• 4 walking / sitting / idle poses<br/>• 7 anti-aliased 3D eye expressions"]
+        Props["☕ 3D Volumetric Props<br/>Coffee mug + steam, laptop, idea bulb"]
+        Bubble["💬 6x8 Bold Comic Callout Bubble<br/>Ultra-crisp 2px stems, rock-steady layout,<br/>rotates live LLM thought stream every 4.2s"]
+        LED["🌈 Onboard NeoPixel (GP16)<br/>State-synced organic pulsing"]
     end
 
+    Sensors --> Timeline
     Sensors --> Reflex
-    Sensors --> LLM
-    Screen --> LLM
-    Reflex -->|USB Serial 115200| RP2040
-    LLM -->|Overrides Poster & Mood| RP2040
+    Timeline --> LLM
+    Reflex -->|Serial 115200| RP2040
+    LLM -->|Multi-thought packets (T1~T2~T3)| RP2040
 ```
 
 ### How to Read the Scene (Zero Text Clutter!)
