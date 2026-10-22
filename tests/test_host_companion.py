@@ -145,6 +145,13 @@ class ParseLlmJsonTests(unittest.TestCase):
     def test_reasoning_fallback(self):
         self.assertEqual(hc.parse_llm_json("", '{"k": 2}'), {"k": 2})
 
+    def test_malformed_json_regex_fallback(self):
+        txt = '{"state": "CODING", "theme": "CYBER", "thoughts": ["WTF BUG", "CSS BROKEN"],'
+        res = hc.parse_llm_json(txt)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["thoughts"], ["WTF BUG", "CSS BROKEN"])
+        self.assertEqual(res["state"], "CODING")
+
     def test_garbage(self):
         self.assertIsNone(hc.parse_llm_json("no json here"))
 
@@ -203,6 +210,56 @@ class ThoughtEngineTests(unittest.TestCase):
             self.assertFalse(brain.called.wait(0.3))
         finally:
             eng.stop()
+
+
+class LMStudioBrainVisionTests(unittest.TestCase):
+    def test_analyze_context_vision_payload(self):
+        brain = hc.LMStudioBrain(base_url="http://fake:1234/v1", use_vision=True)
+        captured_payload = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "choices": [{
+                        "message": {
+                            "content": '{"state": "CODING", "theme": "CYBER", "thoughts": ["TESTS GREEN", "FAST CODE"], "mood": "focused", "event": "none", "energy_delta": 0}'
+                        }
+                    }]
+                }
+
+        def mock_post(url, json=None, timeout=None):
+            nonlocal captured_payload
+            captured_payload = json
+            return FakeResponse()
+
+        orig_post = hc.requests.post
+        orig_cap = hc.capture_downscaled_screenshot_b64
+        try:
+            hc.requests.post = mock_post
+            hc.capture_downscaled_screenshot_b64 = lambda max_dim=512: "BASE64MOCK"
+            res = brain.analyze_context(
+                app_name="Cursor",
+                window_title="main.py",
+                activity="coding",
+                energy=80,
+                cpu=12,
+                idle_sec=2.0,
+                work_streak_min=10.0,
+            )
+            self.assertIsNotNone(res)
+            self.assertEqual(res["_source"], "vision")
+            self.assertEqual(res["thoughts"], ["TESTS GREEN", "FAST CODE"])
+            self.assertEqual(captured_payload["max_tokens"], 600)
+            user_msg = captured_payload["messages"][1]
+            self.assertIsInstance(user_msg["content"], list)
+            # Verify image_url is sent in content array
+            self.assertEqual(user_msg["content"][1]["type"], "image_url")
+            self.assertEqual(user_msg["content"][1]["image_url"]["url"], "data:image/jpeg;base64,BASE64MOCK")
+        finally:
+            hc.requests.post = orig_post
+            hc.capture_downscaled_screenshot_b64 = orig_cap
 
 
 if __name__ == "__main__":

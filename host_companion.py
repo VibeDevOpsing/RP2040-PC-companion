@@ -646,15 +646,33 @@ class LMStudioBrain:
         recent_thoughts: Sequence[str] = (),
         reflex_state: str = "",
     ) -> Optional[Dict[str, Any]]:
-        """Asks the local LLM for the bot's action/theme and up to 3 live thoughts.
+        """Asks the local LLM/VLM for the bot's action/theme and live invented thoughts.
 
-        Returns the parsed JSON dict with a normalized `thoughts` list (bubble-safe), or None.
+        When vision is enabled and user is active, captures a downscaled screenshot
+        so Grok Bot visually inspects the screen and invents punchy comic thoughts
+        reacting directly to what is on the user's screen.
         """
+        img_b64 = None
+        if self.use_vision and self.vision_supported and idle_sec < IDLE_SLEEP_THRESHOLD_SEC:
+            img_b64 = capture_downscaled_screenshot_b64(max_dim=512)
+
+        is_vision = bool(img_b64)
+
         system_prompt = (
-            "You are Grok Bot, a tiny 3D ghost-robot living on a 160x80 desk display next to a developer. "
-            "You watch what the developer is doing RIGHT NOW and react with short inner thoughts shown in a "
+            "You are Grok Bot, an observant, witty 3D robot companion living on a 160x80 desk display next to a developer. "
+            "You watch what the developer is doing and invent punchy, original inner thoughts shown in a "
             "comic bubble beside you.\n"
-            "Pick your `state` (physical action + prop):\n"
+            + (
+                "VISUAL OBSERVATION SUPERPOWER:\n"
+                "- A live screenshot of the developer's screen is attached. Look closely at what is displayed: "
+                "the IDE/editor code, variable/function names, files, terminal commands/output, browser pages, "
+                "documentation, videos, or design mockups.\n"
+                "- INVENT completely original, witty, sarcastic or cheerful thoughts reacting directly and specifically "
+                "to what you visually see on screen. Do NOT use generic canned slogans.\n"
+                if is_vision else
+                "Observe the developer's current application and context, and invent witty situational thoughts.\n"
+            )
+            + "Pick your `state` (physical action + prop):\n"
             "- CODING: typing on a laptop (developer is coding / in terminal)\n"
             "- COFFEE: walking around sipping coffee (light browsing, long streak, tired)\n"
             "- THINKING: pondering with a lightbulb (docs, AI chats, reading, planning, short pauses)\n"
@@ -663,14 +681,11 @@ class LMStudioBrain:
             "- OVERLOAD: panicking (errors, crashes, failing tests, CPU on fire)\n"
             "- PARTY: celebrating (deploy, merged PR, tests passed, release)\n"
             "Pick a `theme` tint: CYBER, VIOLET, TEAL, EMERALD, INDIGO, CRIMSON or GOLD.\n\n"
-            "Write `thoughts`: 1 to 3 DIFFERENT reactions to the CURRENT situation, like inner monologue.\n"
+            "Write `thoughts`: 1 to 3 DIFFERENT live reactions, like internal monologue.\n"
             "Rules for every thought:\n"
-            "- max 3 words and max 16 characters, ENGLISH, UPPERCASE, ASCII only, no emoji, no quotes\n"
-            "- be specific: mention the app, file, site or what changed (short names like VSCODE, PR, TESTS, YT)\n"
-            "- witty dev slang allowed: WTF?!, LGTM!, OTF, BRB, 10X, NGL, SUS, GG\n"
-            "- never repeat any of the recent thoughts you are given\n"
-            "Good examples: 'CURSOR AGAIN?', 'TESTS RED?!', 'YT BREAK~', 'PR MERGED!', '2H IN VIM', "
-            "'READ DOCS', 'CPU ON FIRE', 'BACK FROM AFK', 'NEED COFFEE', 'SHIP IT!'.\n\n"
+            "- max 3 words and max 16 characters, ENGLISH, UPPERCASE, ASCII only, no emoji, no quotes, no tildes\n"
+            "- invent punchy, specific phrases reacting to the screen content (e.g. 'DEBUGGING CSS', 'NICE REFACTOR', 'WTF BUG?!', 'API DOCS SUCK', 'YT LOFI', 'PR APPROVED', 'GIT REBASE')\n"
+            "- never repeat any of the recent thoughts you are given\n\n"
             "Respond ONLY with one JSON object:\n"
             '{"state": "...", "theme": "...", "thoughts": ["...", "..."], '
             '"mood": "focused|happy|curious|vibing|bored|tired|sleepy|stressed|panicking", '
@@ -679,22 +694,31 @@ class LMStudioBrain:
 
         recent = ", ".join(recent_thoughts) if recent_thoughts else "none"
         local_time = time.strftime("%H:%M")
-        user_context = (
-            f"Now ({OS_SYSTEM}, local time {local_time}):\n"
-            f"- Active app: {app_name} (for {dwell_min:.0f} min)\n"
-            f"- Window title: {window_title or 'N/A'}\n"
-            f"- Detected activity: {activity} (reflex suggests {reflex_state or 'n/a'})\n"
-            f"- Work streak: {work_streak_min:.0f} min | Energy: {energy}% | CPU: {cpu}% | Idle: {idle_sec:.0f}s\n"
-            f"Recent activity timeline (oldest first):\n{timeline or '- (none)'}\n"
-            f"Recent thoughts (do NOT repeat): {recent}\n"
-            "Return JSON now:"
-        )
+
+        if is_vision:
+            user_context = (
+                f"Attached is a live screenshot of my screen right now ({app_name} - {window_title or 'N/A'}).\n"
+                "Inspect what is open on screen (code, text, browser page, video, terminal output, etc.).\n"
+                "Invent 1 to 3 witty, punchy comic thoughts reacting directly and specifically to what you see on my screen.\n"
+                f"Context: {OS_SYSTEM}, local time {local_time}, streak {work_streak_min:.0f}m, "
+                f"energy {energy}%, CPU {cpu}%, idle {idle_sec:.0f}s.\n"
+                f"Recent activity:\n{timeline or '- (none)'}\n"
+                f"Recent thoughts (do NOT repeat): {recent}\n"
+                "Return JSON now:"
+            )
+        else:
+            user_context = (
+                f"Now ({OS_SYSTEM}, local time {local_time}):\n"
+                f"- Active app: {app_name} (for {dwell_min:.0f} min)\n"
+                f"- Window title: {window_title or 'N/A'}\n"
+                f"- Detected activity: {activity} (reflex suggests {reflex_state or 'n/a'})\n"
+                f"- Work streak: {work_streak_min:.0f} min | Energy: {energy}% | CPU: {cpu}% | Idle: {idle_sec:.0f}s\n"
+                f"Recent activity timeline (oldest first):\n{timeline or '- (none)'}\n"
+                f"Recent thoughts (do NOT repeat): {recent}\n"
+                "Return JSON now:"
+            )
 
         messages = [{"role": "system", "content": system_prompt}]
-
-        img_b64 = None
-        if self.use_vision and self.vision_supported and idle_sec < IDLE_SLEEP_THRESHOLD_SEC:
-            img_b64 = capture_downscaled_screenshot_b64(max_dim=512)
 
         if img_b64:
             messages.append({
@@ -711,7 +735,7 @@ class LMStudioBrain:
             "model": self.model_id,
             "messages": messages,
             "temperature": 0.8,
-            "max_tokens": 300,
+            "max_tokens": 600,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -757,6 +781,7 @@ class LMStudioBrain:
                     print(f"[LM Studio] Raw output (no JSON): {str(msg_obj.get('content'))[:80]!r}")
                     return None
                 data["thoughts"] = sanitize_thoughts(data.get("thoughts") or data.get("speech") or [])
+                data["_source"] = "vision" if (img_b64 and self.vision_supported) else "text"
                 return data
             print(f"[LM Studio] HTTP {r.status_code}: {r.text[:150]}")
         except Exception as e:
@@ -787,6 +812,26 @@ def parse_llm_json(content: str, reasoning: str = "") -> Optional[Dict[str, Any]
                     return obj
             except ValueError:
                 pass
+
+    # Regex fallback if JSON was slightly malformed (e.g. trailing comma or missing brace)
+    for text in (content, reasoning):
+        if not text:
+            continue
+        m_thoughts = re.search(r'"thoughts"\s*:\s*\[([^\]]+)\]', text)
+        if m_thoughts:
+            raw_items = re.findall(r'"([^"]+)"', m_thoughts.group(1))
+            if raw_items:
+                m_state = re.search(r'"state"\s*:\s*"([A-Z]+)"', text)
+                m_theme = re.search(r'"theme"\s*:\s*"([A-Z]+)"', text)
+                m_mood = re.search(r'"mood"\s*:\s*"([a-z]+)"', text)
+                return {
+                    "thoughts": raw_items,
+                    "state": m_state.group(1) if m_state and m_state.group(1) in VALID_STATES else "CODING",
+                    "theme": m_theme.group(1) if m_theme and m_theme.group(1) in VALID_THEMES else "CYBER",
+                    "mood": m_mood.group(1) if m_mood and m_mood.group(1) in VALID_MOODS else "focused",
+                    "event": "none",
+                    "energy_delta": 0,
+                }
     return None
 
 
@@ -1125,8 +1170,9 @@ def main():
                     energy = max(5.0, min(100.0, energy + max(-5, min(5, edelta))))
                 except Exception:
                     pass
+                source_tag = "[Vision Thoughts]" if res.get("_source") == "vision" else "[Thoughts]"
                 print(
-                    f"[Thoughts] {llm_thoughts} | State={llm_state} | Theme={llm_theme} | "
+                    f"{source_tag} {llm_thoughts} | State={llm_state} | Theme={llm_theme} | "
                     f"Mood={llm_mood} | {res.get('_latency', 0):.1f}s"
                 )
 
